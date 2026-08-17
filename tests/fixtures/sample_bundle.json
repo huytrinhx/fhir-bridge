@@ -1,0 +1,54 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "StructureDefinition",
+        "id": "Patient",
+        "url": "http://hl7.org/fhir/StructureDefinition/Patient",
+        "name": "Patient",
+        "kind": "resource",
+        "abstract": false,
+        "type": "Patient",
+        "description": "Demographics and other administrative information about an individual receiving care."
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "StructureDefinition",
+        "id": "Observation",
+        "url": "http://hl7.org/fhir/StructureDefinition/Observation",
+        "name": "Observation",
+        "kind": "resource",
+        "abstract": false,
+        "type": "Observation",
+        "description": "Measurements and simple assertions made about a patient, device or other subject."
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "StructureDefinition",
+        "id": "DomainResource",
+        "url": "http://hl7.org/fhir/StructureDefinition/DomainResource",
+        "name": "DomainResource",
+        "kind": "resource",
+        "abstract": true,
+        "type": "DomainResource",
+        "description": "A resource that includes narrative, extensions, and contained resources."
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "StructureDefinition",
+        "id": "string",
+        "url": "http://hl7.org/fhir/StructureDefinition/string",
+        "name": "string",
+        "kind": "primitive-type",
+        "abstract": false,
+        "type": "string",
+        "description": "A sequence of Unicode characters"
+      }
+    }
+  ]
+}
