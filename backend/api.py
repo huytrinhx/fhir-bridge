@@ -18,10 +18,12 @@ Two usage modes, chosen on the frontend's landing page:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
 import anthropic
 import psycopg
@@ -29,6 +31,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend import auth, google_oauth, persistence
@@ -46,7 +49,13 @@ from backend.models import list_available_models
 from backend.notifications import notify_feedback_submitted
 from backend.phi_redaction import redact_phi
 
-FRONTEND_ORIGIN = "http://localhost:5173"
+# In local dev the frontend runs on Vite's dev server (5173) while the
+# backend runs on 8000, so the OAuth redirect and CORS need to know that's a
+# different origin. In production (single Railway service, see Dockerfile)
+# the frontend is served by this same app, so FRONTEND_ORIGIN should be set
+# to that service's own public URL.
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 GUEST_IDLE_TIMEOUT_SECONDS = 20 * 60
 SWEEP_INTERVAL_SECONDS = 120
 
@@ -482,3 +491,11 @@ def get_feedback_detail(feedback_id: str, authorization: str | None = Header(Non
     if row is None:
         raise HTTPException(status_code=404, detail="unknown feedback id")
     return row
+
+
+# Serves the built frontend (frontend/dist, produced by `npm run build`) so a
+# single process can host both the API and the UI -- see the root Dockerfile.
+# Registered last so it never shadows the /api/* routes above: Starlette
+# matches routes in registration order, and this mount's prefix is "/".
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

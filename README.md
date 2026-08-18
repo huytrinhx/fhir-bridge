@@ -132,3 +132,52 @@ useful for iterating on prompts/guardrails without the frontend.
 
 See `product.md` for the full feature/rules rundown and `agents.md` for
 conventions and decisions worth knowing before touching this codebase.
+
+## Deploying to Railway
+
+The root `Dockerfile` builds the frontend and serves it (plus the API) out
+of one FastAPI process, so this ships as a **single Railway service**. No
+separate frontend host or CORS setup needed in production — `railway.toml`
+tells Railway to build with that Dockerfile.
+
+1. **Database.** This app needs Postgres with `pgvector`, which Railway's
+   default Postgres plugin doesn't include. Either:
+   - Use [Supabase](https://supabase.com) (has `pgvector` built in — point
+     `DATABASE_URL` at its connection string), or
+   - Deploy Railway's `pgvector`-flavored Postgres template instead of the
+     plain Postgres plugin.
+2. **Create the Railway service** from this GitHub repo. Railway will pick
+   up `railway.toml`/`Dockerfile` automatically.
+3. **Attach a volume**, e.g. mounted at `/data`, and set
+   `INGEST_DATA_DIR=/data`. The backend reads `whitelist_r4.json` (the
+   guardrail's source of truth) from this path at request time
+   (`backend/config.py`); without a volume it would need re-ingesting after
+   every redeploy, since container filesystems are ephemeral otherwise.
+4. **Set environment variables** on the service (see `.env.example` for what
+   each does): `DATABASE_URL`, `KYMA_API_KEY`, `SECRET_KEY`, and once you
+   know the service's Railway domain, `FRONTEND_ORIGIN=https://<that
+   domain>` and `GOOGLE_REDIRECT_URI=https://<that domain>/api/auth/google/callback`
+   (also register the same redirect URI in the Google Cloud Console OAuth
+   client). Add `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`RESEND_API_KEY`
+   if you want social login / feedback emails.
+5. **Deploy.** The app starts and serves the UI fine even before ingestion
+   has run — only actual recommendation requests need the whitelist/KB data.
+6. **Run ingestion once**, inside the running container so the output lands
+   on the volume from step 3 (the Railway CLI's `railway run` executes
+   *locally* with Railway's env vars, which would write the whitelist to
+   your own machine instead — use `railway ssh` so it runs in the deployed
+   container):
+   ```bash
+   railway ssh
+   # inside the container:
+   python -m ingestion.scripts.run_ingest
+   python -m ingestion.scripts.run_ingest_ig --package us_core
+   ```
+   Re-run these only when the corpus needs refreshing — the `data/`
+   directory persists on the volume across redeploys as long as it stays
+   attached.
+
+Note: `_sessions` (guest conversations) and OAuth CSRF state are in-memory
+dicts (`backend/api.py`, `backend/google_oauth.py`), so this only works
+correctly as a **single replica** — don't scale the service horizontally
+without moving that state to Postgres/Redis first.

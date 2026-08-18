@@ -80,19 +80,33 @@ for the user to finish account selection/consent themselves.
 
 ## Deployment direction (as of this writing)
 
-The maintainer intends to publish this to GitHub and deploy with **Supabase**
-as the Postgres host (Supabase supports the `pgvector` extension natively, so
-the existing schema/ingestion pipeline should port without changes to the
-SQL itself — just point `DATABASE_URL` at the Supabase connection string and
-re-run the ingestion scripts against it, or migrate the data). Things worth
-checking when that happens:
-- `.env` is gitignored — confirm no secrets are committed before pushing.
-- `data/` is gitignored (ingestion output) — the deployed environment needs
-  its own ingestion run, or a data migration, since that directory won't
-  ship with the repo.
-- CORS / redirect URIs (`GOOGLE_REDIRECT_URI`, frontend `API_BASE`) are
-  currently hardcoded to `localhost` — these need updating for a real
-  deployment target.
+The app deploys as a **single Railway service** (root `Dockerfile` +
+`railway.toml`): it builds the frontend and serves it plus the API from one
+FastAPI process, so there's no separate frontend host and no CORS
+in production. Postgres is **Supabase** (has `pgvector` built in — Railway's
+default plugin doesn't) unless a `pgvector`-flavored Postgres template is
+used on Railway instead. Full step-by-step is in README.md's "Deploying to
+Railway" section — the highlights, since they were open questions when this
+note was first written:
+- `FRONTEND_ORIGIN` (CORS + Google OAuth redirect target) and the frontend's
+  `VITE_API_BASE` are now env-driven (`backend/api.py`,
+  `frontend/src/api.ts`) instead of hardcoded to `localhost` — set
+  `FRONTEND_ORIGIN`/`GOOGLE_REDIRECT_URI` to the Railway domain in prod,
+  leave `VITE_API_BASE` unset (same-origin) in prod.
+- `data/` (ingestion output, including the whitelist the guardrail depends
+  on) is still gitignored — the deployed container needs a Railway volume
+  (`INGEST_DATA_DIR` pointed at its mount path) plus a one-off ingestion run
+  via `railway ssh`, not `railway run` (which executes locally, missing the
+  volume). See README for the exact commands.
+- `pyproject.toml` needed an explicit `[tool.setuptools.packages.find]`
+  (`include = ["backend*", "ingestion*"]`) — flat-layout auto-discovery
+  couldn't tell packages (`backend`, `ingestion`) from non-package
+  directories (`data`, `eval`, `frontend`) and `pip install -e .` was
+  actually failing before this. If you add new top-level packages, update
+  that include list too.
+- `_sessions` and OAuth CSRF state are in-memory (`backend/api.py`,
+  `backend/google_oauth.py`) — single replica only, don't scale
+  horizontally without moving that state to Postgres/Redis first.
 
 ## Where to look for more
 

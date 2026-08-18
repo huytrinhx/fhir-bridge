@@ -10,7 +10,11 @@ import type {
   StartFields,
 } from "./types";
 
-export const API_BASE = "http://localhost:8000";
+// Empty string = same-origin, which is correct in production (backend
+// serves the built frontend, see root Dockerfile). Local dev runs the
+// frontend on Vite's dev server (5173) separate from the backend (8000), so
+// frontend/.env sets VITE_API_BASE=http://localhost:8000 there.
+export const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
