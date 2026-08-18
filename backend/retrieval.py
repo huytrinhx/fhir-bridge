@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 import psycopg
 from openai import OpenAI
-from pgvector.psycopg import Vector, register_vector
+from pgvector import Vector
+from pgvector.psycopg import register_vector
 
 from backend.config import Settings
 
