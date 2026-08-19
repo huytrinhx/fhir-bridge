@@ -3,6 +3,13 @@ export interface AuthUser {
   username: string | null;
   email: string | null;
   display_name: string | null;
+  is_admin: boolean;
+}
+
+export interface AdminSettings {
+  intent_model: string;
+  synth_model: string;
+  models: string[];
 }
 
 export interface Citation {
@@ -16,6 +23,30 @@ export interface RecommendationItem {
   category: "must_have" | "potentially_needed";
   rationale: string;
   citation: Citation;
+}
+
+export interface MappedFieldEntry {
+  segment: string;
+  field_position: number;
+  field_name: string;
+  raw_value: string;
+  target_path: string;
+  explanation: string | null;
+  source_url: string;
+  applied_to_skeleton: boolean;
+}
+
+export interface UnmappedFieldEntry {
+  segment: string;
+  field_position: number;
+  raw_value: string;
+}
+
+export interface ResourceMappingResponse {
+  resource_type: string;
+  skeleton: Record<string, unknown>;
+  mapped_fields: MappedFieldEntry[];
+  unmapped_fields: UnmappedFieldEntry[];
 }
 
 export type MessageResponse =
@@ -35,7 +66,6 @@ export interface StartFields {
   data_sample?: string | null;
   data_format?: string | null;
   terminology_system?: string | null;
-  model?: string | null;
 }
 
 export interface ConversationSummary {

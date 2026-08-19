@@ -1,5 +1,6 @@
 import { getToken } from "./auth";
 import type {
+  AdminSettings,
   AuthUser,
   ConversationDetail,
   ConversationSummary,
@@ -7,6 +8,7 @@ import type {
   FeedbackReceipt,
   FeedbackSummary,
   MessageResponse,
+  ResourceMappingResponse,
   StartFields,
 } from "./types";
 
@@ -68,11 +70,6 @@ export async function postMessage(sessionId: string, message: string): Promise<M
   });
 }
 
-export async function listModels(): Promise<string[]> {
-  const data = await request<{ models: string[] }>("/api/models");
-  return data.models;
-}
-
 export async function listConversations(searchRegex?: string): Promise<ConversationSummary[]> {
   const query = searchRegex ? `?search=${encodeURIComponent(searchRegex)}` : "";
   const data = await request<{ conversations: ConversationSummary[] }>(`/api/conversations${query}`);
@@ -85,6 +82,16 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
 
 export async function rerunConversation(id: string): Promise<MessageResponse> {
   return request(`/api/conversations/${id}/rerun`, { method: "POST" });
+}
+
+export async function getResourceMapping(
+  sessionId: string,
+  resourceType: string,
+): Promise<ResourceMappingResponse> {
+  return request(`/api/conversations/${sessionId}/mapping`, {
+    method: "POST",
+    body: JSON.stringify({ resource_type: resourceType }),
+  });
 }
 
 export async function submitFeedback(
@@ -104,4 +111,22 @@ export async function listFeedback(): Promise<FeedbackSummary[]> {
 
 export async function getFeedback(id: string): Promise<FeedbackDetail> {
   return request(`/api/feedback/${id}`);
+}
+
+export async function getAdminSettings(): Promise<AdminSettings> {
+  return request("/api/admin/settings");
+}
+
+export async function updateAdminSettings(intentModel: string, synthModel: string): Promise<AdminSettings> {
+  return request("/api/admin/settings", {
+    method: "POST",
+    body: JSON.stringify({ intent_model: intentModel, synth_model: synthModel }),
+  });
+}
+
+export async function adminRerunConversation(conversationId: string, model: string): Promise<MessageResponse> {
+  return request(`/api/admin/conversations/${conversationId}/rerun`, {
+    method: "POST",
+    body: JSON.stringify({ model }),
+  });
 }

@@ -266,13 +266,19 @@ TurnOutcome = OutOfScope | ClarifyingQuestion | FinalRecommendation
 class FhirBridgeSession:
     """One conversation. Call start() once, then respond() per clarifying answer."""
 
-    def __init__(self, settings: Settings | None = None, synth_model: str | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        synth_model: str | None = None,
+        intent_model: str | None = None,
+    ):
         self._settings = settings or load_settings()
-        # Intent gate always stays on the fixed trusted default regardless of
-        # synth_model -- the scope gate is cheap and reliability there matters
-        # more than user choice; an untested model's blast radius is contained
-        # to the synthesis loop, where the whitelist/citation guardrails
-        # already protect against bad output.
+        # Intent gate model is admin-configured (backend/api.py::_resolve_model_
+        # defaults), independent of synth_model -- the scope gate is cheap and
+        # reliability there matters more than per-user choice; there's no
+        # per-conversation UI for it, unlike synth_model which the user picks
+        # from a dropdown.
+        self._intent_model = intent_model or self._settings.intent_model
         self._synth_model = synth_model or self._settings.synth_model
         self._client = anthropic.Anthropic(
             base_url=self._settings.kyma_messages_base_url,
@@ -293,7 +299,7 @@ class FhirBridgeSession:
 
     def _check_intent(self, use_case: str) -> tuple[bool, str]:
         msg = self._client.messages.create(
-            model=self._settings.intent_model,
+            model=self._intent_model,
             max_tokens=300,
             tools=[INTENT_TOOL],
             tool_choice={"type": "tool", "name": "classify_intent"},

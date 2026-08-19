@@ -60,6 +60,17 @@ CREATE TABLE IF NOT EXISTS feedback_reports (
 
 ALTER TABLE feedback_reports ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id);
 CREATE INDEX IF NOT EXISTS feedback_reports_user_id_idx ON feedback_reports (user_id);
+
+-- Single-row table (id is always 'default') holding the admin-configured
+-- intent/synthesis model defaults -- NULL columns mean "no override yet,
+-- use the KYMA_INTENT_MODEL/KYMA_SYNTH_MODEL env default" (see
+-- backend/api.py::_resolve_model_defaults).
+CREATE TABLE IF NOT EXISTS app_settings (
+    id TEXT PRIMARY KEY DEFAULT 'default',
+    intent_model TEXT,
+    synth_model TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 INSERT_PASSWORD_USER_SQL = """
@@ -143,27 +154,52 @@ FROM conversations
 WHERE id = %(id)s AND user_id = %(user_id)s;
 """
 
+# Unscoped by user -- only the admin diagnostic rerun uses this (see
+# backend/api.py::admin_rerun_conversation), which needs to rerun any user's
+# conversation to test whether a reported quality issue is model-specific.
+GET_CONVERSATION_BY_ID_SQL = """
+SELECT id, created_at, initial_message, data_format, terminology_system, data_sample,
+       model, outcome_kind, display_transcript, last_outcome
+FROM conversations
+WHERE id = %(id)s;
+"""
+
 INSERT_FEEDBACK_SQL = """
 INSERT INTO feedback_reports (id, conversation_id, user_id, user_expectation, transcript_snapshot, outcome_snapshot)
 VALUES (%(id)s, %(conversation_id)s, %(user_id)s, %(user_expectation)s, %(transcript_snapshot)s, %(outcome_snapshot)s)
 RETURNING id, created_at;
 """
 
-LIST_FEEDBACK_SQL = """
+# Unscoped by user -- quality reports are an admin-only view (see
+# backend/api.py::_require_admin), not a per-user feature, so there's no
+# per-submitter-scoped equivalent of these.
+LIST_ALL_FEEDBACK_SQL = """
 SELECT f.id, f.created_at, f.conversation_id, f.user_expectation, c.initial_message, c.model
 FROM feedback_reports f
 JOIN conversations c ON c.id = f.conversation_id
-WHERE f.user_id = %(user_id)s
 ORDER BY f.created_at DESC
 LIMIT %(limit)s;
 """
 
-GET_FEEDBACK_SQL = """
+GET_FEEDBACK_BY_ID_SQL = """
 SELECT f.id, f.created_at, f.conversation_id, f.user_expectation,
        f.transcript_snapshot, f.outcome_snapshot, c.initial_message, c.model
 FROM feedback_reports f
 JOIN conversations c ON c.id = f.conversation_id
-WHERE f.id = %(id)s AND f.user_id = %(user_id)s;
+WHERE f.id = %(id)s;
+"""
+
+GET_APP_SETTINGS_SQL = """
+SELECT intent_model, synth_model FROM app_settings WHERE id = 'default';
+"""
+
+UPSERT_APP_SETTINGS_SQL = """
+INSERT INTO app_settings (id, intent_model, synth_model, updated_at)
+VALUES ('default', %(intent_model)s, %(synth_model)s, now())
+ON CONFLICT (id) DO UPDATE SET
+    intent_model = EXCLUDED.intent_model,
+    synth_model = EXCLUDED.synth_model,
+    updated_at = now();
 """
 
 
@@ -288,6 +324,12 @@ def get_conversation(conn: psycopg.Connection, conversation_id: str, user_id: st
         return cur.fetchone()
 
 
+def get_conversation_by_id(conn: psycopg.Connection, conversation_id: str) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(GET_CONVERSATION_BY_ID_SQL, {"id": conversation_id})
+        return cur.fetchone()
+
+
 def save_feedback(
     conn: psycopg.Connection,
     *,
@@ -313,13 +355,26 @@ def save_feedback(
         return cur.fetchone()
 
 
-def list_feedback(conn: psycopg.Connection, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+def list_all_feedback(conn: psycopg.Connection, limit: int = 100) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
-        cur.execute(LIST_FEEDBACK_SQL, {"user_id": user_id, "limit": limit})
+        cur.execute(LIST_ALL_FEEDBACK_SQL, {"limit": limit})
         return cur.fetchall()
 
 
-def get_feedback(conn: psycopg.Connection, feedback_id: str, user_id: str) -> dict[str, Any] | None:
+def get_feedback_by_id(conn: psycopg.Connection, feedback_id: str) -> dict[str, Any] | None:
     with conn.cursor() as cur:
-        cur.execute(GET_FEEDBACK_SQL, {"id": feedback_id, "user_id": user_id})
+        cur.execute(GET_FEEDBACK_BY_ID_SQL, {"id": feedback_id})
         return cur.fetchone()
+
+
+def get_app_settings(conn: psycopg.Connection) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(GET_APP_SETTINGS_SQL)
+        return cur.fetchone()
+
+
+def save_app_settings(conn: psycopg.Connection, *, intent_model: str, synth_model: str) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute(UPSERT_APP_SETTINGS_SQL, {"intent_model": intent_model, "synth_model": synth_model})
+    conn.commit()
+    return {"intent_model": intent_model, "synth_model": synth_model}

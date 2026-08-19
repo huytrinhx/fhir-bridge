@@ -45,6 +45,8 @@ from backend.agent import (
     serialize_messages,
 )
 from backend.config import load_settings
+from backend.guardrails import load_whitelist
+from backend.mapping import build_resource_mapping
 from backend.models import list_available_models
 from backend.notifications import notify_feedback_submitted
 from backend.phi_redaction import redact_phi
@@ -62,6 +64,12 @@ SWEEP_INTERVAL_SECONDS = 120
 _sessions: dict[str, FhirBridgeSession] = {}
 _session_models: dict[str, str] = {}
 _session_last_active: dict[str, float] = {}
+# (data_format, data_sample) for the live in-flight conversation -- needed by
+# the mapping endpoint below. compose_use_case only ever embeds these into
+# the composed prompt string, so without this they'd be unrecoverable for a
+# guest session (nothing persisted) or for an authenticated session before
+# its first _persist() call.
+_session_data_samples: dict[str, tuple[str | None, str | None]] = {}
 
 
 async def _sweep_idle_sessions() -> None:
@@ -77,6 +85,7 @@ async def _sweep_idle_sessions() -> None:
             _sessions.pop(sid, None)
             _session_models.pop(sid, None)
             _session_last_active.pop(sid, None)
+            _session_data_samples.pop(sid, None)
 
 
 @asynccontextmanager
@@ -103,12 +112,27 @@ class MessageRequest(BaseModel):
     data_sample: str | None = None
     data_format: str | None = None
     terminology_system: str | None = None
-    model: str | None = None
+    # No client-supplied model override -- cost-risk control. Every
+    # conversation uses the admin-configured default (_resolve_model_defaults),
+    # never a per-request choice.
 
 
 class FeedbackRequest(BaseModel):
     conversation_id: str
     user_expectation: str
+
+
+class MappingRequest(BaseModel):
+    resource_type: str
+
+
+class AdminSettingsRequest(BaseModel):
+    intent_model: str
+    synth_model: str
+
+
+class AdminRerunRequest(BaseModel):
+    model: str
 
 
 class SignupRequest(BaseModel):
@@ -122,12 +146,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
-def _public_user(row: dict) -> dict:
+def _public_user(row: dict, settings) -> dict:
     return {
         "id": str(row["id"]),
         "username": row.get("username"),
         "email": row.get("email"),
         "display_name": row.get("display_name"),
+        "is_admin": auth.is_admin_email(row.get("username"), row.get("email"), settings.admin_email),
     }
 
 
@@ -136,6 +161,42 @@ def _require_user_id(authorization: str | None) -> str:
     if user_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
     return user_id
+
+
+def _require_admin(authorization: str | None, settings) -> str:
+    user_id = _require_user_id(authorization)
+    conn = persistence.get_connection(settings)
+    try:
+        user = persistence.get_user_by_id(conn, user_id)
+    finally:
+        conn.close()
+    if user is None or not auth.is_admin_email(user.get("username"), user.get("email"), settings.admin_email):
+        raise HTTPException(status_code=403, detail="admin access required")
+    return user_id
+
+
+def _resolve_model_defaults(settings) -> tuple[str, str]:
+    """(intent_model, synth_model) -- the admin-configured override
+    (backend/persistence.py::app_settings) if one has been saved, else the
+    KYMA_INTENT_MODEL/KYMA_SYNTH_MODEL env default."""
+    conn = persistence.get_connection(settings)
+    try:
+        persistence.ensure_schema(conn)
+        row = persistence.get_app_settings(conn)
+    finally:
+        conn.close()
+    intent_model = (row and row.get("intent_model")) or settings.intent_model
+    synth_model = (row and row.get("synth_model")) or settings.synth_model
+    return intent_model, synth_model
+
+
+def _serialize_mapping(mapping) -> dict:
+    return {
+        "resource_type": mapping.resource_type,
+        "skeleton": mapping.skeleton,
+        "mapped_fields": [asdict(f) for f in mapping.mapped_fields],
+        "unmapped_fields": [asdict(f) for f in mapping.unmapped_fields],
+    }
 
 
 def _serialize_outcome(outcome) -> dict:
@@ -197,14 +258,13 @@ async def _run_agent_call(fn, *args) -> object:
     except anthropic.APIError as exc:
         # Full upstream detail (raw provider error JSON) goes to the server
         # log, not the client -- it's noisy/technical and not actionable for
-        # an end user picking a model from a dropdown.
+        # an end user, who has no model choice to act on (see MessageRequest).
         print(f"[api] model call failed: {exc}")
         raise HTTPException(
             status_code=502,
             detail=(
-                "This model couldn't complete the request -- it may not support the "
-                "tool-calling this app requires, or is temporarily unavailable. "
-                "Try a different model."
+                "The model backing this app couldn't complete the request -- it may be "
+                "temporarily unavailable. Please try again shortly."
             ),
         ) from exc
 
@@ -216,7 +276,7 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
     if req.session_id is None:
         settings = load_settings()
         conversation_id = str(uuid.uuid4())
-        model = req.model or settings.synth_model
+        default_intent_model, model = _resolve_model_defaults(settings)
 
         message = req.message
         data_sample = req.data_sample
@@ -225,13 +285,14 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
             if data_sample:
                 data_sample, _ = redact_phi(data_sample)
 
-        session = FhirBridgeSession(settings, synth_model=model)
+        session = FhirBridgeSession(settings, synth_model=model, intent_model=default_intent_model)
         initial_message = compose_use_case(message, data_sample, req.data_format, req.terminology_system)
         outcome = await _run_agent_call(session.start, initial_message)
 
         _sessions[conversation_id] = session
         _session_models[conversation_id] = model
         _session_last_active[conversation_id] = time.time()
+        _session_data_samples[conversation_id] = (req.data_format, data_sample)
 
         if user_id:
             _persist(
@@ -276,12 +337,6 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
     return {"session_id": req.session_id, **_serialize_outcome(outcome)}
 
 
-@app.get("/api/models")
-def get_models() -> dict:
-    settings = load_settings()
-    return {"models": list_available_models(settings)}
-
-
 @app.post("/api/auth/signup")
 def signup(req: SignupRequest) -> dict:
     if not req.username.strip() or not req.password:
@@ -303,7 +358,7 @@ def signup(req: SignupRequest) -> dict:
         conn.close()
 
     token = auth.create_access_token(str(user["id"]))
-    return {"token": token, "user": _public_user(user)}
+    return {"token": token, "user": _public_user(user, settings)}
 
 
 @app.post("/api/auth/login")
@@ -321,7 +376,7 @@ def login(req: LoginRequest) -> dict:
         raise HTTPException(status_code=401, detail="invalid username or password")
 
     token = auth.create_access_token(str(user["id"]))
-    return {"token": token, "user": _public_user(user)}
+    return {"token": token, "user": _public_user(user, settings)}
 
 
 @app.get("/api/auth/google/login")
@@ -364,7 +419,7 @@ def get_me(authorization: str | None = Header(None)) -> dict:
         conn.close()
     if user is None:
         raise HTTPException(status_code=401, detail="user not found")
-    return _public_user(user)
+    return _public_user(user, settings)
 
 
 @app.get("/api/conversations")
@@ -411,8 +466,11 @@ async def rerun_conversation(conversation_id: str, authorization: str | None = H
         raise HTTPException(status_code=404, detail="unknown conversation_id")
 
     new_id = str(uuid.uuid4())
-    model = row["model"] or settings.synth_model
-    session = FhirBridgeSession(settings, synth_model=model)
+    # Always the current admin default, not whatever model the original
+    # conversation happened to use -- rerunning is not a way to keep re-using
+    # an old per-conversation choice from before model selection was removed.
+    default_intent_model, model = _resolve_model_defaults(settings)
+    session = FhirBridgeSession(settings, synth_model=model, intent_model=default_intent_model)
     initial_message = compose_use_case(
         row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
     )
@@ -421,6 +479,7 @@ async def rerun_conversation(conversation_id: str, authorization: str | None = H
     _sessions[new_id] = session
     _session_models[new_id] = model
     _session_last_active[new_id] = time.time()
+    _session_data_samples[new_id] = (row["data_format"], row["data_sample"])
     _persist(
         new_id,
         session,
@@ -468,12 +527,12 @@ def post_feedback(req: FeedbackRequest, authorization: str | None = Header(None)
 
 @app.get("/api/feedback")
 def get_feedback_list(authorization: str | None = Header(None)) -> dict:
-    user_id = _require_user_id(authorization)
     settings = load_settings()
+    _require_admin(authorization, settings)
     conn = persistence.get_connection(settings)
     try:
         persistence.ensure_schema(conn)
-        rows = persistence.list_feedback(conn, user_id)
+        rows = persistence.list_all_feedback(conn)
     finally:
         conn.close()
     return {"reports": rows}
@@ -481,16 +540,142 @@ def get_feedback_list(authorization: str | None = Header(None)) -> dict:
 
 @app.get("/api/feedback/{feedback_id}")
 def get_feedback_detail(feedback_id: str, authorization: str | None = Header(None)) -> dict:
-    user_id = _require_user_id(authorization)
     settings = load_settings()
+    _require_admin(authorization, settings)
     conn = persistence.get_connection(settings)
     try:
-        row = persistence.get_feedback(conn, feedback_id, user_id)
+        row = persistence.get_feedback_by_id(conn, feedback_id)
     finally:
         conn.close()
     if row is None:
         raise HTTPException(status_code=404, detail="unknown feedback id")
     return row
+
+
+@app.get("/api/admin/settings")
+def get_admin_settings(authorization: str | None = Header(None)) -> dict:
+    settings = load_settings()
+    _require_admin(authorization, settings)
+    intent_model, synth_model = _resolve_model_defaults(settings)
+    return {
+        "intent_model": intent_model,
+        "synth_model": synth_model,
+        "models": list_available_models(settings),
+    }
+
+
+@app.post("/api/admin/settings")
+def update_admin_settings(req: AdminSettingsRequest, authorization: str | None = Header(None)) -> dict:
+    settings = load_settings()
+    _require_admin(authorization, settings)
+
+    available = list_available_models(settings)
+    if req.intent_model not in available:
+        raise HTTPException(status_code=400, detail=f"{req.intent_model!r} is not an available model")
+    if req.synth_model not in available:
+        raise HTTPException(status_code=400, detail=f"{req.synth_model!r} is not an available model")
+
+    conn = persistence.get_connection(settings)
+    try:
+        persistence.ensure_schema(conn)
+        result = persistence.save_app_settings(conn, intent_model=req.intent_model, synth_model=req.synth_model)
+    finally:
+        conn.close()
+    return result
+
+
+@app.post("/api/admin/conversations/{conversation_id}/rerun")
+async def admin_rerun_conversation(
+    conversation_id: str, req: AdminRerunRequest, authorization: str | None = Header(None)
+) -> dict:
+    """Diagnostic-only counterpart to /api/conversations/{id}/rerun: lets the
+    admin explicitly pick a model to test whether a reported quality issue is
+    model-specific. Unlike the public rerun endpoint (which always uses the
+    admin-configured default, see MessageRequest), this one exists precisely
+    to override that default -- it's gated on admin auth, not exposed to
+    regular users, and doesn't touch the cost-risk removal that route enforces.
+    Can rerun any user's conversation (get_conversation_by_id is unscoped),
+    since the report being investigated may not belong to the admin."""
+    settings = load_settings()
+    admin_user_id = _require_admin(authorization, settings)
+
+    available = list_available_models(settings)
+    if req.model not in available:
+        raise HTTPException(status_code=400, detail=f"{req.model!r} is not an available model")
+
+    conn = persistence.get_connection(settings)
+    try:
+        row = persistence.get_conversation_by_id(conn, conversation_id)
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown conversation_id")
+
+    new_id = str(uuid.uuid4())
+    # Intent gate stays on the admin-configured default regardless -- only
+    # the synthesis model is under test here.
+    default_intent_model, _default_synth_model = _resolve_model_defaults(settings)
+    session = FhirBridgeSession(settings, synth_model=req.model, intent_model=default_intent_model)
+    initial_message = compose_use_case(
+        row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
+    )
+    outcome = await _run_agent_call(session.start, initial_message)
+
+    _sessions[new_id] = session
+    _session_models[new_id] = req.model
+    _session_last_active[new_id] = time.time()
+    _session_data_samples[new_id] = (row["data_format"], row["data_sample"])
+    # Persisted under the admin's own account -- this is the admin's
+    # diagnostic run, not a modification of the original reporter's history.
+    _persist(
+        new_id,
+        session,
+        outcome,
+        user_id=admin_user_id,
+        initial_message=row["initial_message"],
+        data_format=row["data_format"],
+        terminology_system=row["terminology_system"],
+        data_sample=row["data_sample"],
+        model=req.model,
+    )
+    return {"session_id": new_id, **_serialize_outcome(outcome)}
+
+
+@app.post("/api/conversations/{conversation_id}/mapping")
+async def get_resource_mapping(
+    conversation_id: str, req: MappingRequest, authorization: str | None = Header(None)
+) -> dict:
+    """Deterministic suggested-payload + segment-mapping lookup for one
+    resource card -- no LLM call (see backend/mapping.py). Tries the live
+    in-memory session first (works for guests and for an authenticated
+    conversation that hasn't necessarily finished persisting yet), falling
+    back to the persisted record for a conversation loaded from history,
+    which requires auth like every other conversation-history endpoint."""
+    live = _session_data_samples.get(conversation_id)
+    settings = load_settings()
+    if live is not None:
+        data_format, data_sample = live
+    else:
+        user_id = _require_user_id(authorization)
+        conn = persistence.get_connection(settings)
+        try:
+            row = persistence.get_conversation(conn, conversation_id, user_id)
+        finally:
+            conn.close()
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown conversation_id")
+        data_format, data_sample = row["data_format"], row["data_sample"]
+
+    whitelist = load_whitelist(settings.whitelist_path)
+    if req.resource_type not in whitelist:
+        raise HTTPException(status_code=400, detail=f"{req.resource_type!r} is not a valid FHIR R4 resource type")
+
+    conn = persistence.get_connection(settings)
+    try:
+        mapping = await run_in_threadpool(build_resource_mapping, conn, req.resource_type, data_format, data_sample)
+    finally:
+        conn.close()
+    return _serialize_mapping(mapping)
 
 
 # Serves the built frontend (frontend/dist, produced by `npm run build`) so a

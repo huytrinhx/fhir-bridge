@@ -58,3 +58,21 @@ def user_id_from_header(authorization: str | None) -> str | None:
     if not token:
         return None
     return decode_access_token(token)
+
+
+def is_admin_email(username: str | None, email: str | None, admin_email: str | None) -> bool:
+    """There's exactly one admin, identified by matching ADMIN_EMAIL (see
+    backend/config.py) against either the account's email or its username --
+    a password-signup account has no required email field (see
+    frontend/src/components/AuthPanel.tsx), so someone who types their email
+    into the username box instead is still recognized. Case-insensitive
+    since email providers treat case as insignificant for the local part in
+    practice and a user shouldn't lose admin access over capitalization."""
+    if not admin_email:
+        return False
+    admin_email = admin_email.strip().lower()
+    if email and email.strip().lower() == admin_email:
+        return True
+    if username and username.strip().lower() == admin_email:
+        return True
+    return False

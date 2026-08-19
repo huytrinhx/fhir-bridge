@@ -43,3 +43,24 @@ def test_user_id_from_header_variants(monkeypatch: pytest.MonkeyPatch):
     assert auth.user_id_from_header("Bearer ") is None
     assert auth.user_id_from_header("NotBearer sometoken") is None
     assert auth.user_id_from_header("Bearer garbage-token") is None
+
+
+def test_is_admin_email_matches_on_email_case_insensitively():
+    assert auth.is_admin_email(None, "Admin@Example.com", "admin@example.com") is True
+    assert auth.is_admin_email(None, "admin@example.com", "admin@example.com") is True
+
+
+def test_is_admin_email_matches_on_username_case_insensitively():
+    # A password-signup account has no required email field, so someone who
+    # types their email into the username box instead is still recognized.
+    assert auth.is_admin_email("Admin@Example.com", None, "admin@example.com") is True
+    assert auth.is_admin_email("admin@example.com", "someone-else@example.com", "admin@example.com") is True
+
+
+def test_is_admin_email_rejects_when_neither_matches():
+    assert auth.is_admin_email("someone-else", "someone-else@example.com", "admin@example.com") is False
+
+
+def test_is_admin_email_rejects_when_admin_email_unset():
+    assert auth.is_admin_email("admin@example.com", "admin@example.com", None) is False
+    assert auth.is_admin_email(None, None, None) is False

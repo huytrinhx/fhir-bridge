@@ -1,39 +1,22 @@
-import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import type { StartFields } from "../types";
 
 const DATA_FORMATS = ["CSV", "HL7v2", "JSON", "XML", "Other"];
 const TERMINOLOGY_SYSTEMS = ["LOINC", "SNOMED CT", "ICD-10-CM", "RxNorm", "CPT", "UCUM", "Other"];
-const DEFAULT_MODEL = "claude-sonnet-5";
 const DATA_SAMPLE_MAX_CHARS = 4000;
 
 interface Props {
-  models: string[];
-  modelsLoading: boolean;
   submitting: boolean;
   onStart: (fields: StartFields) => void;
 }
 
-function groupModels(models: string[]): Map<string, string[]> {
-  const groups = new Map<string, string[]>();
-  for (const model of models) {
-    const prefix = model.split("-")[0];
-    const list = groups.get(prefix) ?? [];
-    list.push(model);
-    groups.set(prefix, list);
-  }
-  return groups;
-}
-
-export default function InputPanel({ models, modelsLoading, submitting, onStart }: Props) {
+export default function InputPanel({ submitting, onStart }: Props) {
   const [message, setMessage] = useState("");
   const [dataSample, setDataSample] = useState("");
   const [dataFormat, setDataFormat] = useState("");
   const [terminologySystem, setTerminologySystem] = useState("");
-  const [model, setModel] = useState(DEFAULT_MODEL);
   const [truncated, setTruncated] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const modelGroups = useMemo(() => groupModels(models), [models]);
 
   function applySample(text: string) {
     const wasTruncated = text.length > DATA_SAMPLE_MAX_CHARS;
@@ -59,7 +42,6 @@ export default function InputPanel({ models, modelsLoading, submitting, onStart 
       data_sample: dataSample.trim() || null,
       data_format: dataFormat || null,
       terminology_system: terminologySystem || null,
-      model,
     });
   }
 
@@ -108,27 +90,6 @@ export default function InputPanel({ models, modelsLoading, submitting, onStart 
               <option key={t} value={t}>
                 {t}
               </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field">
-          <span className="field__label">Model</span>
-          <select
-            className="field__select"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            disabled={submitting || modelsLoading}
-          >
-            {modelsLoading && <option>Loading…</option>}
-            {[...modelGroups.entries()].map(([prefix, ids]) => (
-              <optgroup key={prefix} label={prefix}>
-                {ids.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </optgroup>
             ))}
           </select>
         </label>

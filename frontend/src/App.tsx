@@ -2,8 +2,8 @@ import { useState, useRef, useEffect, type FormEvent } from "react";
 import {
   getConversation,
   getCurrentUser,
+  getResourceMapping,
   listConversations,
-  listModels,
   postMessage,
   rerunConversation,
   startConversation,
@@ -16,6 +16,7 @@ import type {
   DisplayTranscriptEntry,
   MessageResponse,
   RecommendationItem,
+  ResourceMappingResponse,
   StartFields,
 } from "./types";
 import InputPanel from "./components/InputPanel";
@@ -23,6 +24,7 @@ import HistorySidebar from "./components/HistorySidebar";
 import FeedbackModal from "./components/FeedbackModal";
 import AdminFeedback from "./components/AdminFeedback";
 import LandingPage from "./components/LandingPage";
+import PayloadMappingPanel from "./components/PayloadMappingPanel";
 import "./App.css";
 
 interface ChatMessage {
@@ -59,19 +61,36 @@ function transcriptToMessages(entries: DisplayTranscriptEntry[]): ChatMessage[] 
   }));
 }
 
-function ResourceCard({ item }: { item: RecommendationItem }) {
+function ResourceCard({
+  item,
+  onViewPayload,
+}: {
+  item: RecommendationItem;
+  onViewPayload: ((resourceType: string) => void) | null;
+}) {
   return (
     <li className="resource-card">
       <div className="resource-card__header">
         <span className="resource-card__type">{item.resource_type}</span>
-        <a
-          className="resource-card__source"
-          href={item.citation.url}
-          target="_blank"
-          rel="noreferrer"
-        >
-          source ↗
-        </a>
+        <div className="resource-card__actions">
+          {onViewPayload && (
+            <button
+              type="button"
+              className="resource-card__view-payload"
+              onClick={() => onViewPayload(item.resource_type)}
+            >
+              View suggested payload
+            </button>
+          )}
+          <a
+            className="resource-card__source"
+            href={item.citation.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            source ↗
+          </a>
+        </div>
       </div>
       <p className="resource-card__rationale">{item.rationale}</p>
     </li>
@@ -81,9 +100,11 @@ function ResourceCard({ item }: { item: RecommendationItem }) {
 function RecommendationPanel({
   state,
   onReportIssue,
+  onViewPayload,
 }: {
   state: RecommendationState | null;
   onReportIssue: (() => void) | null;
+  onViewPayload: ((resourceType: string) => void) | null;
 }) {
   if (!state) {
     return (
@@ -102,7 +123,7 @@ function RecommendationPanel({
         ) : (
           <ul className="resource-list">
             {state.mustHave.map((item) => (
-              <ResourceCard key={item.resource_type} item={item} />
+              <ResourceCard key={item.resource_type} item={item} onViewPayload={onViewPayload} />
             ))}
           </ul>
         )}
@@ -115,7 +136,7 @@ function RecommendationPanel({
         ) : (
           <ul className="resource-list">
             {state.potentiallyNeeded.map((item) => (
-              <ResourceCard key={item.resource_type} item={item} />
+              <ResourceCard key={item.resource_type} item={item} onViewPayload={onViewPayload} />
             ))}
           </ul>
         )}
@@ -174,8 +195,11 @@ export default function App() {
   const [finished, setFinished] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
   const [recommendation, setRecommendation] = useState<RecommendationState | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(true);
+  const [dataFormat, setDataFormat] = useState<string | null>(null);
+  const [mappingPanelResourceType, setMappingPanelResourceType] = useState<string | null>(null);
+  const [mappingCache, setMappingCache] = useState<Record<string, ResourceMappingResponse>>({});
+  const [mappingLoading, setMappingLoading] = useState(false);
+  const [mappingError, setMappingError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [showFeedback, setShowFeedback] = useState(false);
@@ -194,13 +218,6 @@ export default function App() {
   // clicking "New conversation" mid-request used to let the old response
   // repopulate sessionId/messages/recommendation on the fresh conversation.
   const generationRef = useRef(0);
-
-  useEffect(() => {
-    listModels()
-      .then(setModels)
-      .catch(() => {})
-      .finally(() => setModelsLoading(false));
-  }, []);
 
   // Resolve which stage to land on: a Google OAuth redirect carries a fresh
   // token in the URL; otherwise fall back to whatever's in localStorage from
@@ -307,6 +324,10 @@ export default function App() {
     setFinished(false);
     setReadOnly(false);
     setRecommendation(null);
+    setDataFormat(null);
+    setMappingPanelResourceType(null);
+    setMappingCache({});
+    setMappingError(null);
     if (authUser) {
       // The conversation being left is already persisted turn-by-turn (every
       // start/respond call saves it server-side) -- this just makes sure the
@@ -341,6 +362,10 @@ export default function App() {
     setFinished(false);
     setReadOnly(false);
     setRecommendation(null);
+    setDataFormat(null);
+    setMappingPanelResourceType(null);
+    setMappingCache({});
+    setMappingError(null);
     setConversations([]);
   }
 
@@ -349,6 +374,10 @@ export default function App() {
     setMode("chat");
     setReadOnly(false);
     setMessages([{ id: nextId(), role: "user", text: fields.message }]);
+    setDataFormat(fields.data_format ?? null);
+    setMappingPanelResourceType(null);
+    setMappingCache({});
+    setMappingError(null);
     setLoading(true);
     setError(null);
     try {
@@ -405,6 +434,10 @@ export default function App() {
       setFinished(true);
       setSessionId(detail.id);
       setMessages(transcriptToMessages(detail.display_transcript));
+      setDataFormat(detail.data_format);
+      setMappingPanelResourceType(null);
+      setMappingCache({});
+      setMappingError(null);
       if (detail.last_outcome?.kind === "final_recommendation") {
         setRecommendation({
           mustHave: detail.last_outcome.must_have,
@@ -432,6 +465,10 @@ export default function App() {
       setReadOnly(false);
       setFinished(false);
       setRecommendation(null);
+      setDataFormat(detail.data_format);
+      setMappingPanelResourceType(null);
+      setMappingCache({});
+      setMappingError(null);
       setMessages([{ id: nextId(), role: "user", text: detail.initial_message }]);
       const outcome = await rerunConversation(id);
       if (generationRef.current !== myGeneration) return;
@@ -456,6 +493,28 @@ export default function App() {
   }
 
   const canReportIssue = !isGuest && finished && sessionId ? () => setShowFeedback(true) : null;
+
+  async function toggleMapping(resourceType: string) {
+    if (mappingPanelResourceType === resourceType) {
+      setMappingPanelResourceType(null);
+      return;
+    }
+    setMappingPanelResourceType(resourceType);
+    setMappingError(null);
+    if (!sessionId || mappingCache[resourceType]) return;
+
+    setMappingLoading(true);
+    try {
+      const result = await getResourceMapping(sessionId, resourceType);
+      setMappingCache((prev) => ({ ...prev, [resourceType]: result }));
+    } catch (err) {
+      setMappingError(err instanceof Error ? err.message : "couldn't build a suggested payload");
+    } finally {
+      setMappingLoading(false);
+    }
+  }
+
+  const canViewPayload = sessionId ? toggleMapping : null;
 
   function beginResize(which: "sidebar" | "chat") {
     return (e: React.MouseEvent) => {
@@ -546,9 +605,9 @@ export default function App() {
             <button type="button" className="secondary-button" onClick={startNewConversation}>
               New conversation
             </button>
-            {!isGuest && (
+            {!isGuest && authUser?.is_admin && (
               <button type="button" className="secondary-button" onClick={() => setPage("admin")}>
-                Quality Reports
+                Admin
               </button>
             )}
           </div>
@@ -561,12 +620,7 @@ export default function App() {
         )}
 
         {mode === "input" ? (
-          <InputPanel
-            models={models}
-            modelsLoading={modelsLoading}
-            submitting={loading}
-            onStart={handleStart}
-          />
+          <InputPanel submitting={loading} onStart={handleStart} />
         ) : (
           <>
             <div className="thread">
@@ -610,8 +664,19 @@ export default function App() {
       <div className="resize-handle" onMouseDown={beginResize("chat")} />
 
       <div className="panel-column">
-        <RecommendationPanel state={recommendation} onReportIssue={canReportIssue} />
+        <RecommendationPanel state={recommendation} onReportIssue={canReportIssue} onViewPayload={canViewPayload} />
       </div>
+
+      {mappingPanelResourceType && (
+        <PayloadMappingPanel
+          resourceType={mappingPanelResourceType}
+          dataFormat={dataFormat}
+          data={mappingCache[mappingPanelResourceType] ?? null}
+          loading={mappingLoading && !mappingCache[mappingPanelResourceType]}
+          error={mappingError}
+          onClose={() => setMappingPanelResourceType(null)}
+        />
+      )}
 
       {showFeedback && (
         <FeedbackModal onSubmit={handleFeedbackSubmit} onClose={() => setShowFeedback(false)} />
