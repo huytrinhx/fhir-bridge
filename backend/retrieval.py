@@ -40,6 +40,7 @@ class FhirRetriever:
         self._database_url = settings.database_url
 
     def _embed_query(self, query: str) -> list[float]:
+        print(f"[retrieval] embedding query: {query!r}")
         result = self._embed_client.embeddings.create(model=self._embedding_model, input=[query])
         return result.data[0].embedding
 

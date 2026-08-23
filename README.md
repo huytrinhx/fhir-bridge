@@ -68,9 +68,8 @@ refreshing), not part of the live request path:
 
 - Python 3.11+
 - Node 20+
-- Postgres with the `pgvector` extension available (a local Docker container
-  works fine — the ingestion pipeline runs `CREATE EXTENSION IF NOT EXISTS
-  vector` for you)
+- Docker (for local Postgres + `pgvector` — see Setup below; no local
+  Postgres install needed)
 - A [Kyma](https://kymaapi.com) API key (embeddings + LLM inference)
 - Optional: [Resend](https://resend.com) API key for feedback-report emails,
   Google OAuth client credentials for social login
@@ -79,8 +78,12 @@ refreshing), not part of the live request path:
 
 ```bash
 # from repo root
-cp .env.example .env        # fill in DATABASE_URL, KYMA_API_KEY, SECRET_KEY at minimum
+cp .env.example .env        # fill in KYMA_API_KEY, SECRET_KEY at minimum
+                             # (DATABASE_URL already matches docker-compose.yml)
 pip install -e ".[dev]"
+
+# start Postgres + pgvector in Docker (first run pulls the image)
+docker compose up -d
 
 # one-time: build the retrieval corpus (downloads spec + IG, embeds, stores)
 python -m ingestion.scripts.run_ingest
@@ -94,6 +97,13 @@ cd frontend
 npm install
 npm run dev      # http://localhost:5173
 ```
+
+The `postgres` service in `docker-compose.yml` persists data in a named
+Docker volume (`postgres_data`), so it survives `docker compose down` —
+use `docker compose down -v` if you actually want to wipe it. The
+container's `pgvector` extension is enabled automatically by the image;
+the ingestion pipeline still runs `CREATE EXTENSION IF NOT EXISTS vector`
+itself, so nothing extra is needed on first run.
 
 `SECRET_KEY` can be any long random string — it signs session JWTs; changing
 it invalidates all issued tokens. See `.env.example` for every variable and

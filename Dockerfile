@@ -24,3 +24,4 @@ EXPOSE 8000
 
 # Shell form so $PORT (Railway sets this at runtime) actually expands.
 CMD uvicorn backend.api:app --host 0.0.0.0 --port ${PORT:-8000}
+d

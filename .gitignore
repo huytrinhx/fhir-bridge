@@ -6,3 +6,5 @@ data/
 .pytest_cache/
 build/
 *.egg-info/
+uv.lock
+scratchpad.json

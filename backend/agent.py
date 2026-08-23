@@ -32,7 +32,13 @@ SEARCH_TOOL = {
     ),
     "input_schema": {
         "type": "object",
-        "properties": {"query": {"type": "string", "description": "natural-language search query"}},
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "natural-language search query",
+                "minLength": 1,
+            }
+        },
         "required": ["query"],
     },
 }
@@ -407,12 +413,19 @@ class FhirBridgeSession:
                     # unanswered tool_use block leaves the conversation
                     # unrecoverable on the next call. Add explicit pressure
                     # instead of silently rewarding the ignored hint.
-                    chunks = self._retriever.search(block.input["query"])
-                    self._ledger.record(chunks)
-                    result_text = (
-                        "\n".join(f"- {c.resource_type}: {c.text} ({c.source_url})" for c in chunks)
-                        or "No matches found."
-                    )
+                    query = block.input.get("query", "").strip()
+                    if not query:
+                        result_text = (
+                            "Empty query -- call search_fhir_kb again with a non-empty, "
+                            "descriptive search query."
+                        )
+                    else:
+                        chunks = self._retriever.search(query)
+                        self._ledger.record(chunks)
+                        result_text = (
+                            "\n".join(f"- {c.resource_type}: {c.text} ({c.source_url})" for c in chunks)
+                            or "No matches found."
+                        )
                     if forcing_convergence:
                         result_text += (
                             "\n\n(No more searching -- call ask_clarifying_question or "

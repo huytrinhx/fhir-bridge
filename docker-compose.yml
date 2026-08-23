@@ -1,0 +1,22 @@
+# Local Postgres + pgvector for development. Credentials match the
+# DATABASE_URL in .env.example — change both together if you customize this.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: fhir-bridge-postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: fhir_bridge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d fhir_bridge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
