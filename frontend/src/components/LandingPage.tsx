@@ -13,11 +13,27 @@ export default function LandingPage({ onGuest, onAuthenticated }: Props) {
   return (
     <div className="landing">
       <div className="landing__intro">
-        <h1>FHIR Bud</h1>
-        <p>
-          Describe a real-world healthcare data source and get a grounded, cited list of the
-          FHIR R4 resources you need. Choose how you want to use it.
+        <p className="landing__eyebrow">
+          <span className="wordmark-mark" aria-hidden="true" />
+          FHIR R4 · grounded resource recommendations
         </p>
+        <h1>Describe the data source. Get the resources it maps to.</h1>
+        <p className="landing__lede">
+          Every FHIR R4 resource FHIR Bud recommends is checked against the real spec before it
+          reaches you — nothing is guessed, and nothing is shown without a citation back to the
+          source text.
+        </p>
+        <ul className="landing__clauses">
+          <li>
+            <span className="panel__clause">§1</span> No invented resource types
+          </li>
+          <li>
+            <span className="panel__clause">§2</span> No invented terminology codes
+          </li>
+          <li>
+            <span className="panel__clause">§3</span> Every recommendation cited
+          </li>
+        </ul>
       </div>
 
       {!showAuth ? (
