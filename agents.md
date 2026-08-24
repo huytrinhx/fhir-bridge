@@ -108,6 +108,16 @@ note was first written:
   `backend/google_oauth.py`) — single replica only, don't scale
   horizontally without moving that state to Postgres/Redis first.
 
+## Agent skills
+
+### Issue tracker
+
+Issues live on GitHub (huytrinhx/fhir-bridge), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout (`CONTEXT.md` + `docs/adr/` at repo root). See `docs/agents/domain.md`.
+
 ## Where to look for more
 
 - `product.md` — feature list and the rules the guardrails actually enforce.
