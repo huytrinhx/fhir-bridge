@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 import psycopg
 import pytest
@@ -25,7 +26,19 @@ from backend.graph import (
     build_graph,
 )
 from backend.guardrails import WhitelistEntry
+from backend.persistence import EventLogger, ensure_schema
 from backend.retrieval import RetrievedChunk
+
+
+class FakeEventLogger:
+    """Records every log() call in order, instead of writing to Postgres --
+    lets tests assert on the rollup/per-search shape without a live DB."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, Any, Any]] = []
+
+    def log(self, node_name: str, event_type: str, *, input_data=None, output_data=None) -> None:
+        self.calls.append((node_name, event_type, input_data, output_data))
 
 
 @dataclass
@@ -134,11 +147,13 @@ WHITELIST = {
 }
 
 
-def make_graph(client, retriever, checkpointer=None, whitelist=None):
+def make_graph(client, retriever, checkpointer=None, whitelist=None, event_logger=None):
     return build_graph(
         client=client,
         retriever=retriever,
         whitelist=whitelist if whitelist is not None else WHITELIST,
+        # settings=None -> every log() call is a no-op, same as a guest session.
+        event_logger=event_logger if event_logger is not None else EventLogger(None, "test-session"),
         intent_model="test-intent-model",
         synth_model="test-synth-model",
         checkpointer=checkpointer or InMemorySaver(),
@@ -402,6 +417,64 @@ def test_exceeding_max_turns_raises_runtime_error():
         invoke(graph, start_payload("raw patient registration feed"))
 
 
+def test_event_logger_records_rollups_and_per_search_calls():
+    client = FakeAnthropicClient(
+        [
+            intent_response(in_scope=True),
+            search_response("patient demographics"),
+            submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
+        ]
+    )
+    retriever = FakeRetriever({"patient demographics": [PATIENT_CHUNK]})
+    events = FakeEventLogger()
+    graph = make_graph(client, retriever, event_logger=events)
+
+    invoke(graph, start_payload("raw patient registration feed"))
+
+    node_events = [(node, kind) for node, kind, _, _ in events.calls]
+    assert node_events == [
+        ("intent", "start"),
+        ("intent", "finish"),
+        ("reasoning", "start"),
+        ("reasoning", "finish"),
+        ("retrieval", "start"),
+        ("retrieval", "search_fhir_kb"),
+        ("retrieval", "finish"),
+        ("reasoning", "start"),
+        ("reasoning", "finish"),
+    ]
+
+    search_call = next(c for c in events.calls if c[:2] == ("retrieval", "search_fhir_kb"))
+    assert search_call[2] == {"query": "patient demographics"}
+    assert "Patient" in search_call[3]["result_text"]
+
+
+def test_event_logger_logs_clarification_once_per_round_not_on_pause():
+    # interrupt() replays clarification_node from the top on every resume --
+    # logging must fire exactly once per round (after the answer arrives),
+    # never once for the pausing call and again for the resuming call.
+    client = FakeAnthropicClient(
+        [
+            intent_response(in_scope=True),
+            ask_response(["Need device tracking?"]),
+            submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
+        ]
+    )
+    retriever = FakeRetriever({"patient": [PATIENT_CHUNK]})
+    events = FakeEventLogger()
+    graph = make_graph(client, retriever, event_logger=events)
+
+    result1, config = invoke(graph, start_payload("raw patient registration feed"))
+    assert "__interrupt__" in result1
+    assert [c[:2] for c in events.calls if c[0] == "clarification"] == []
+
+    graph.invoke(Command(resume="No device tracking needed."), config)
+
+    clarification_calls = [c for c in events.calls if c[0] == "clarification"]
+    assert [c[:2] for c in clarification_calls] == [("clarification", "finish")]
+    assert clarification_calls[0][3] == {"answer": "No device tracking needed."}
+
+
 def test_postgres_checkpointer_persists_state_after_each_node():
     settings = load_settings()
     if not settings.database_url:
@@ -442,5 +515,60 @@ def test_postgres_checkpointer_persists_state_after_each_node():
         cur.execute("SELECT count(*) AS n FROM checkpoints WHERE thread_id = %s", (thread_id,))
         after_second = cur.fetchone()["n"]
     assert after_second > after_first
+
+    conn.close()
+
+
+def test_event_logger_writes_queryable_rows_per_session_id():
+    settings = load_settings()
+    if not settings.database_url:
+        pytest.skip("DATABASE_URL not configured for local Postgres")
+
+    # ensure_schema's SCHEMA_SQL is multi-statement, which psycopg3's
+    # extended protocol (used once prepare_threshold=0 forces immediate
+    # preparation) rejects -- match production (backend/api.py's
+    # _resolve_model_defaults) by running it on a plain connection first,
+    # same as the app always does before a FhirBridgeSession is ever built.
+    schema_conn = psycopg.connect(settings.database_url, row_factory=dict_row)
+    ensure_schema(schema_conn)
+    schema_conn.close()
+
+    conn = psycopg.connect(settings.database_url, autocommit=True, prepare_threshold=0, row_factory=dict_row)
+    checkpointer = PostgresSaver(conn)
+    checkpointer.setup()
+
+    session_id = str(uuid.uuid4())
+    client = FakeAnthropicClient(
+        [
+            intent_response(in_scope=True),
+            search_response("patient demographics"),
+            submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
+        ]
+    )
+    retriever = FakeRetriever({"patient demographics": [PATIENT_CHUNK]})
+    graph = make_graph(
+        client, retriever, checkpointer=checkpointer, event_logger=EventLogger(settings, session_id)
+    )
+
+    graph.invoke(start_payload("raw patient registration feed"), {"configurable": {"thread_id": session_id}})
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT node_name, event_type FROM decision_events WHERE session_id = %s ORDER BY id",
+            (session_id,),
+        )
+        rows = cur.fetchall()
+
+    assert [(r["node_name"], r["event_type"]) for r in rows] == [
+        ("intent", "start"),
+        ("intent", "finish"),
+        ("reasoning", "start"),
+        ("reasoning", "finish"),
+        ("retrieval", "start"),
+        ("retrieval", "search_fhir_kb"),
+        ("retrieval", "finish"),
+        ("reasoning", "start"),
+        ("reasoning", "finish"),
+    ]
 
     conn.close()

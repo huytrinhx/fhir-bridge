@@ -20,7 +20,7 @@ classes back into a checkpoint reader.
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict
 
 import anthropic
 from langgraph.graph import END, START, StateGraph
@@ -172,6 +172,16 @@ final answer.
 """
 
 
+class EventLogger(Protocol):
+    """Structural type for backend/persistence.py's EventLogger -- kept as a
+    Protocol here (rather than importing that class) so this module stays
+    decoupled from psycopg, matching the rest of its dependency shape
+    (client/retriever/whitelist/checkpointer are all handed in already
+    constructed, never built from scratch here)."""
+
+    def log(self, node_name: str, event_type: str, *, input_data: Any = None, output_data: Any = None) -> None: ...
+
+
 class GraphState(TypedDict, total=False):
     use_case: str
     messages: list[dict]
@@ -256,12 +266,15 @@ def build_graph(
     client: anthropic.Anthropic,
     retriever: FhirRetriever,
     whitelist: dict[str, WhitelistEntry],
+    event_logger: EventLogger,
     intent_model: str,
     synth_model: str,
     checkpointer: BaseCheckpointSaver,
 ) -> CompiledStateGraph:
     def intent_node(state: GraphState) -> dict:
+        event_logger.log("intent", "start", input_data={"use_case": state["use_case"]})
         in_scope, reason = _check_intent(client, intent_model, state["use_case"])
+        event_logger.log("intent", "finish", output_data={"in_scope": in_scope, "reason": reason})
         if not in_scope:
             return {"outcome": {"kind": "out_of_scope", "reason": reason}}
         return {"messages": state["messages"] + [{"role": "user", "content": state["use_case"]}]}
@@ -287,6 +300,17 @@ def build_graph(
         if ask_available:
             tools.append(ASK_TOOL)
 
+        event_logger.log(
+            "reasoning",
+            "start",
+            input_data={
+                "turn_index": turn_index,
+                "clarification_rounds": clarification_rounds,
+                "forcing_convergence": forcing_convergence,
+                "available_tools": [t["name"] for t in tools],
+            },
+        )
+
         response = client.messages.create(
             model=synth_model,
             max_tokens=1500,
@@ -302,6 +326,18 @@ def build_graph(
         no_tool_use = not had_any_tool_use
         if no_tool_use:
             messages = messages + [{"role": "user", "content": NO_TOOL_USE_NUDGE}]
+
+        event_logger.log(
+            "reasoning",
+            "finish",
+            output_data={
+                "stop_reason": response.stop_reason,
+                "no_tool_use": no_tool_use,
+                "search_queries": [b["query"] for b in search_blocks],
+                "asked_questions": ask_block["questions"] if ask_block else None,
+                "submitted": submit_input is not None,
+            },
+        )
 
         return {
             "messages": messages,
@@ -328,6 +364,10 @@ def build_graph(
     def retrieval_node(state: GraphState) -> dict:
         ledger_state = dict(state.get("ledger", {}))
         tool_results: list[dict] = []
+
+        event_logger.log(
+            "retrieval", "start", input_data={"queries": [b["query"] for b in state["search_blocks"]]}
+        )
 
         for block in state["search_blocks"]:
             query = block["query"].strip()
@@ -356,9 +396,16 @@ def build_graph(
                     "\n\n(No more searching -- call ask_clarifying_question or "
                     "submit_recommendation now.)"
                 )
+            event_logger.log(
+                "retrieval",
+                "search_fhir_kb",
+                input_data={"query": block["query"]},
+                output_data={"result_text": result_text},
+            )
             tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result_text})
 
         updates: dict[str, Any] = {"ledger": ledger_state}
+        finish_output = {"resource_types_seen": sorted(ledger_state.keys())}
 
         # A submit or ask co-occurring with search in the same turn takes
         # priority, exactly like the loop this replaces: a submit discards
@@ -366,12 +413,15 @@ def build_graph(
         # since it's what makes the same-turn citation valid); an ask stashes
         # them to be combined with the eventual answer in clarification_node.
         if state["submit_input"] is not None:
+            event_logger.log("retrieval", "finish", output_data=finish_output)
             return updates
         if state["ask_block"] is not None:
             updates["pending_tool_results"] = tool_results
+            event_logger.log("retrieval", "finish", output_data=finish_output)
             return updates
 
         updates["messages"] = state["messages"] + [{"role": "user", "content": tool_results}]
+        event_logger.log("retrieval", "finish", output_data=finish_output)
         return updates
 
     def route_after_retrieval(state: GraphState) -> str:
@@ -384,7 +434,17 @@ def build_graph(
     def clarification_node(state: GraphState) -> dict:
         ask_block = state["ask_block"]
         assert ask_block is not None
+        # No "start" log here: interrupt() re-executes this node from the top
+        # on every resume, so anything logged before it would double-write on
+        # each round-trip. One "finish" entry, written only after interrupt()
+        # actually resolves with an answer, is the safe rollup point.
         answer = interrupt({"questions": ask_block["questions"]})
+        event_logger.log(
+            "clarification",
+            "finish",
+            input_data={"questions": ask_block["questions"]},
+            output_data={"answer": answer},
+        )
 
         tool_results = list(state.get("pending_tool_results", []))
         tool_results.append({"type": "tool_result", "tool_use_id": ask_block["id"], "content": answer})
