@@ -17,6 +17,7 @@ from langgraph.types import Command
 from psycopg.rows import dict_row
 
 from backend.config import Settings, load_settings
+from backend.event_stream import CompositeEventLogger
 from backend.graph import build_graph, content_block_to_dict
 from backend.guardrails import Citation, Recommendation, load_whitelist
 from backend.persistence import EventLogger
@@ -189,8 +190,13 @@ class FhirBridgeSession:
         self._thread_id = session_id or str(uuid.uuid4())
         # EventLogger opens its own connections (see backend/persistence.py)
         # rather than sharing self._checkpoint_conn -- settings=None for
-        # guests, same persist gate as the checkpointer above.
-        self._event_logger = EventLogger(self._settings if persist else None, self._thread_id)
+        # guests, same persist gate as the checkpointer above. Wrapped in
+        # CompositeEventLogger so the live SSE broadcast (backend/api.py,
+        # backend/event_stream.py) still fires for guests even though
+        # persistence itself doesn't -- the stream isn't persistence.
+        self._event_logger = CompositeEventLogger(
+            self._thread_id, EventLogger(self._settings if persist else None, self._thread_id)
+        )
 
         self._graph = build_graph(
             client=self._client,

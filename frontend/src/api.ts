@@ -8,6 +8,8 @@ import type {
   FeedbackReceipt,
   FeedbackSummary,
   MessageResponse,
+  PolledProgressEvent,
+  ProgressEvent,
   ResourceMappingResponse,
   StartFields,
 } from "./types";
@@ -56,10 +58,10 @@ export async function getCurrentUser(): Promise<AuthUser> {
   return request("/api/auth/me");
 }
 
-export async function startConversation(fields: StartFields): Promise<MessageResponse> {
+export async function startConversation(fields: StartFields, clientSessionId: string): Promise<MessageResponse> {
   return request("/api/messages", {
     method: "POST",
-    body: JSON.stringify({ session_id: null, ...fields }),
+    body: JSON.stringify({ session_id: null, client_session_id: clientSessionId, ...fields }),
   });
 }
 
@@ -68,6 +70,69 @@ export async function postMessage(sessionId: string, message: string): Promise<M
     method: "POST",
     body: JSON.stringify({ session_id: sessionId, message }),
   });
+}
+
+// Live per-node status while a conversation turn is in flight (issue #4).
+// Plain EventSource, not the request() wrapper -- EventSource can't send an
+// Authorization header at all, and the backend endpoint is deliberately
+// unauthenticated for exactly that reason (session_id is the capability
+// token, see backend/api.py::stream_messages).
+export function openProgressStream(sessionId: string): EventSource {
+  return new EventSource(`${API_BASE}/api/messages/stream?session_id=${encodeURIComponent(sessionId)}`);
+}
+
+// Best-effort: resolves once the stream is confirmed open, or after
+// timeoutMs, whichever comes first -- callers proceed either way so a slow
+// or failed stream connection never blocks starting the actual conversation.
+export function waitForOpen(es: EventSource, timeoutMs = 1500): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(resolve, timeoutMs);
+    es.addEventListener(
+      "open",
+      () => {
+        window.clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+// Polling fallback once a progress stream drops (issue #4) -- reads the same
+// decision_events rows the stream is sourced from, scoped to the requesting
+// user (unlike the stream, this is a durable-data read, so it goes through
+// the authenticated request() wrapper and naturally 401s/throws for guests,
+// who have nothing persisted to recover anyway).
+export async function fetchEvents(sessionId: string, afterId: number): Promise<PolledProgressEvent[]> {
+  const data = await request<{ events: PolledProgressEvent[] }>(
+    `/api/messages/events?session_id=${encodeURIComponent(sessionId)}&after_id=${afterId}`,
+  );
+  return data.events;
+}
+
+const EVENT_LABELS: Record<string, string> = {
+  "intent/start": "Detecting intent…",
+  "intent/finish": "Intent confirmed…",
+  "reasoning/start": "Deciding what to do next…",
+  "reasoning/finish": "Reviewing the next step…",
+  "retrieval/start": "Searching the FHIR knowledge base…",
+  "retrieval/finish": "Search results ready…",
+  // clarification/finish deliberately doesn't echo the answer back -- the
+  // user just typed it (see backend/graph.py's clarification_node, which
+  // only ever logs "finish", never "start", since interrupt() replays the
+  // node from the top on every resume).
+  "clarification/finish": "Incorporating your answer…",
+};
+
+export function describeEvent(evt: ProgressEvent): string {
+  if (evt.node_name === "retrieval" && evt.event_type === "search_fhir_kb") {
+    const query = (evt.input_data as { query?: string } | undefined)?.query;
+    return query ? `Searching: "${query}"` : "Searching…";
+  }
+  // Forward-compatible default: an event type this mapping doesn't know
+  // about yet (a future node, say) still shows *something* live rather than
+  // nothing.
+  return EVENT_LABELS[`${evt.node_name}/${evt.event_type}`] ?? "Working…";
 }
 
 export async function listConversations(searchRegex?: string): Promise<ConversationSummary[]> {
