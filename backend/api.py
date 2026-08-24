@@ -291,7 +291,11 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
         # includes the graph's own checkpointer, not just the conversations
         # table below, so a guest session must never open a Postgres connection.
         session = FhirBridgeSession(
-            settings, synth_model=model, intent_model=default_intent_model, persist=bool(user_id)
+            settings,
+            synth_model=model,
+            intent_model=default_intent_model,
+            persist=bool(user_id),
+            session_id=conversation_id,
         )
         initial_message = compose_use_case(message, data_sample, req.data_format, req.terminology_system)
         outcome = await _run_agent_call(session.start, initial_message)
@@ -479,7 +483,9 @@ async def rerun_conversation(conversation_id: str, authorization: str | None = H
     default_intent_model, model = _resolve_model_defaults(settings)
     # persist=True: this route requires auth (_require_user_id above), never
     # reachable by a guest.
-    session = FhirBridgeSession(settings, synth_model=model, intent_model=default_intent_model, persist=True)
+    session = FhirBridgeSession(
+        settings, synth_model=model, intent_model=default_intent_model, persist=True, session_id=new_id
+    )
     initial_message = compose_use_case(
         row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
     )
@@ -626,7 +632,9 @@ async def admin_rerun_conversation(
     default_intent_model, _default_synth_model = _resolve_model_defaults(settings)
     # persist=True: this route requires admin auth (_require_admin above),
     # never reachable by a guest.
-    session = FhirBridgeSession(settings, synth_model=req.model, intent_model=default_intent_model, persist=True)
+    session = FhirBridgeSession(
+        settings, synth_model=req.model, intent_model=default_intent_model, persist=True, session_id=new_id
+    )
     initial_message = compose_use_case(
         row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
     )

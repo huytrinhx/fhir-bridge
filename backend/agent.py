@@ -19,6 +19,7 @@ from psycopg.rows import dict_row
 from backend.config import Settings, load_settings
 from backend.graph import build_graph, content_block_to_dict
 from backend.guardrails import Citation, Recommendation, load_whitelist
+from backend.persistence import EventLogger
 from backend.retrieval import FhirRetriever
 
 DATA_SAMPLE_MAX_CHARS = 4000
@@ -152,6 +153,7 @@ class FhirBridgeSession:
         intent_model: str | None = None,
         *,
         persist: bool = True,
+        session_id: str | None = None,
     ):
         self._settings = settings or load_settings()
         # Intent gate model is admin-configured (backend/api.py::_resolve_model_
@@ -180,15 +182,25 @@ class FhirBridgeSession:
         else:
             checkpointer = InMemorySaver()
 
+        # session_id doubles as the graph's checkpoint thread_id and the
+        # decision-event log's session_id, so a conversation's event rows
+        # correlate with the same id the frontend/API already know it by
+        # (see backend/api.py's conversation_id), not a second, invisible id.
+        self._thread_id = session_id or str(uuid.uuid4())
+        # EventLogger opens its own connections (see backend/persistence.py)
+        # rather than sharing self._checkpoint_conn -- settings=None for
+        # guests, same persist gate as the checkpointer above.
+        self._event_logger = EventLogger(self._settings if persist else None, self._thread_id)
+
         self._graph = build_graph(
             client=self._client,
             retriever=self._retriever,
             whitelist=self._whitelist,
+            event_logger=self._event_logger,
             intent_model=self._intent_model,
             synth_model=self._synth_model,
             checkpointer=checkpointer,
         )
-        self._thread_id = str(uuid.uuid4())
         self._config = {"configurable": {"thread_id": self._thread_id}, "recursion_limit": 100}
 
         self._started = False

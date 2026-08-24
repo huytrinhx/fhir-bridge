@@ -12,6 +12,7 @@ import backend.agent as agent_module
 from backend.agent import ClarifyingQuestion, FhirBridgeSession, FinalRecommendation, OutOfScope
 from backend.config import load_settings
 from backend.guardrails import WhitelistEntry
+from backend.persistence import ensure_schema, get_connection
 from tests.test_graph import (
     FakeAnthropicClient,
     FakeRetriever,
@@ -31,6 +32,15 @@ def make_session(monkeypatch, responses, chunks_by_query=None, persist=True) -> 
     settings = load_settings()
     if persist and not settings.database_url:
         pytest.skip("DATABASE_URL not configured for local Postgres")
+
+    if persist:
+        # Mirrors backend/api.py's _resolve_model_defaults, which always
+        # ensures the schema exists before any persist=True session is built.
+        conn = get_connection(settings)
+        try:
+            ensure_schema(conn)
+        finally:
+            conn.close()
 
     fake_client = FakeAnthropicClient(responses)
     fake_retriever = FakeRetriever(chunks_by_query or {})
