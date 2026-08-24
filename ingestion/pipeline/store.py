@@ -7,12 +7,17 @@ from pgvector.psycopg import register_vector
 from ingestion.config import Settings
 from ingestion.pipeline.chunk import Chunk
 
-# No ANN index (HNSW/IVFFlat) on embedding: Qwen3 Embedding 8B's 4096 dims
-# exceeds pgvector's indexable limit (2000 dims, 4000 for halfvec). Exact
-# search via `ORDER BY embedding <=> :query` is a sequential scan, which is
-# fine at our current/near-term corpus size (low thousands of chunks). If the
-# corpus grows past ~50k chunks, revisit: switch to a lower-dim model, or
-# reduce via halfvec truncation, and add an index then.
+# No ANN index (HNSW/IVFFlat) on embedding, even though text-embedding-3-
+# small's 1536 dims is under pgvector's indexable limit (2000 dims, 4000 for
+# halfvec) -- exact search via `ORDER BY embedding <=> :query` is a
+# sequential scan, which is fine at our current/near-term corpus size (low
+# thousands of chunks). If the corpus grows past ~50k chunks, revisit: an
+# index is a real option now (it wasn't with the previous 4096-dim model).
+#
+# CREATE TABLE IF NOT EXISTS won't retrofit an existing table if you change
+# this width -- a dimension change means old and new embeddings aren't
+# comparable anyway, so drop fhir_kb_chunks and re-run ingestion from
+# scratch rather than trying to migrate it in place.
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -23,7 +28,7 @@ CREATE TABLE IF NOT EXISTS fhir_kb_chunks (
     source_type TEXT NOT NULL,
     source_url TEXT NOT NULL,
     text TEXT NOT NULL,
-    embedding VECTOR(4096) NOT NULL
+    embedding VECTOR(1536) NOT NULL
 );
 """
 

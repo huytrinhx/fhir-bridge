@@ -57,8 +57,8 @@ data/               Ingestion outputs (whitelist, embeddings source) — gitigno
 refreshing), not part of the live request path:
 - `run_ingest.py` — downloads the FHIR R4 core spec, derives the resource
   **whitelist** (the guardrail's source of truth) and the base knowledge-base
-  chunks, embeds them (Kyma, Qwen3-Embedding-8B, 4096-dim), and stores them
-  in `fhir_kb_chunks` (pgvector, exact search, no ANN index).
+  chunks, embeds them (OpenAI, text-embedding-3-small, 1536-dim), and stores
+  them in `fhir_kb_chunks` (pgvector, exact search, no ANN index).
 - `run_ingest_ig.py --package us_core` — additive: ingests US Core IG
   profiles into the same table, keyed to their base FHIR resource type. Never
   touches the whitelist — only the core spec can expand what the guardrail
@@ -70,7 +70,9 @@ refreshing), not part of the live request path:
 - Node 20+
 - Docker (for local Postgres + `pgvector` — see Setup below; no local
   Postgres install needed)
-- A [Kyma](https://kymaapi.com) API key (embeddings + LLM inference)
+- A [Kyma](https://kymaapi.com) API key (LLM inference + the chat-model
+  catalog) and an [OpenAI](https://platform.openai.com) API key (KB
+  embeddings)
 - Optional: [Resend](https://resend.com) API key for feedback-report emails,
   Google OAuth client credentials for social login
 
@@ -78,7 +80,7 @@ refreshing), not part of the live request path:
 
 ```bash
 # from repo root
-cp .env.example .env        # fill in KYMA_API_KEY, SECRET_KEY at minimum
+cp .env.example .env        # fill in KYMA_API_KEY, OPENAI_API_KEY, SECRET_KEY at minimum
                              # (DATABASE_URL already matches docker-compose.yml)
 pip install -e ".[dev]"
 

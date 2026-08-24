@@ -14,9 +14,13 @@ load_dotenv()
 class Settings:
     database_url: str | None
     kyma_api_key: str | None
+    # Still used for the frontend's chat-model dropdown catalog
+    # (backend/models.py) and LLM inference -- embeddings no longer go
+    # through Kyma, see openai_api_key/openai_embedding_model below.
     kyma_embeddings_base_url: str
     kyma_messages_base_url: str
-    embedding_model: str
+    openai_api_key: str | None
+    openai_embedding_model: str
     intent_model: str
     synth_model: str
     whitelist_path: Path
@@ -31,7 +35,11 @@ def load_settings() -> Settings:
             "KYMA_EMBEDDINGS_BASE_URL", "https://api.kymaapi.com/v1"
         ),
         kyma_messages_base_url=os.environ.get("KYMA_MESSAGES_BASE_URL", "https://kymaapi.com"),
-        embedding_model=os.environ.get("KYMA_EMBEDDING_MODEL", "qwen3-embedding-8b"),
+        openai_api_key=os.environ.get("OPENAI_API_KEY"),
+        # 1536-dim -- matches the VECTOR(1536) column in
+        # ingestion/pipeline/store.py's SCHEMA_SQL. Update both together if
+        # this changes; the KB needs re-ingesting either way.
+        openai_embedding_model=os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
         intent_model=os.environ.get("KYMA_INTENT_MODEL", "claude-sonnet-5"),
         synth_model=os.environ.get("KYMA_SYNTH_MODEL", "qwen3.7-flash"),
         whitelist_path=Path(os.environ.get("INGEST_DATA_DIR", "./data")) / "whitelist_r4.json",

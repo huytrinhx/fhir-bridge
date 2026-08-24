@@ -7,9 +7,16 @@ before making structural changes.
 
 ## Standing technical decisions (don't silently reverse these)
 
-- **Kyma (kymaapi.com)** is the model distribution layer for both embeddings
-  and LLM inference — a deliberate choice, not a placeholder. If it needs
-  replacing, that's a call for the human maintainer, not an inferred cleanup.
+- **Kyma (kymaapi.com)** is the model distribution layer for LLM inference
+  (intent gate, synthesis) and the frontend's chat-model catalog — a
+  deliberate choice, not a placeholder. If it needs replacing, that's a call
+  for the human maintainer, not an inferred cleanup. **KB embeddings go
+  directly to OpenAI instead** (`OPENAI_API_KEY`/`OPENAI_EMBEDDING_MODEL`,
+  `backend/retrieval.py` and `ingestion/pipeline/embed.py`), a deliberate
+  reversal of the earlier Kyma-for-everything choice, made explicitly by the
+  maintainer. Changing the embedding model requires re-ingesting the KB and
+  matching the `VECTOR(...)` column width in
+  `ingestion/pipeline/store.py::SCHEMA_SQL` to its output dimension.
 - **PHI redaction is regex/pattern-based only — no LLM pass.** Explicitly
   chosen over an LLM-based redactor for determinism and auditability. It has
   a known gap (unlabeled names in free prose aren't caught); that gap was

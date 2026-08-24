@@ -50,10 +50,10 @@ def main() -> int:
         print("Skipping embedding step (--skip-embed)")
         return 0
 
-    from ingestion.pipeline.embed import KymaEmbedder
+    from ingestion.pipeline.embed import OpenAIEmbedder
 
-    embedder = KymaEmbedder(settings)
-    print("Embedding chunks via Kyma (Qwen3 Embedding 8B)...")
+    embedder = OpenAIEmbedder(settings)
+    print(f"Embedding chunks via OpenAI ({settings.embedding_model})...")
     embeddings = embedder.embed([chunk.text for chunk in chunks])
 
     if args.skip_store:
