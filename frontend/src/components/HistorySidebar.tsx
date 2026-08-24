@@ -89,7 +89,9 @@ export default function HistorySidebar({
 
       {guestMode ? (
         <p className="sidebar__hint">
-          Guest mode — nothing is saved. Sign in to keep a history of your conversations.
+          Guest mode — this session isn't saved anywhere. If something breaks mid-run there's no
+          crash recovery, nothing is kept in your history, and it's not included in the
+          production-study dataset. Sign in to change that.
         </p>
       ) : (
         <>

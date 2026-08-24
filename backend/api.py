@@ -82,7 +82,9 @@ async def _sweep_idle_sessions() -> None:
             if now - last_active > GUEST_IDLE_TIMEOUT_SECONDS
         ]
         for sid in stale_ids:
-            _sessions.pop(sid, None)
+            session = _sessions.pop(sid, None)
+            if session is not None:
+                session.close()  # releases the Postgres checkpointer connection, if it opened one
             _session_models.pop(sid, None)
             _session_last_active.pop(sid, None)
             _session_data_samples.pop(sid, None)
@@ -285,7 +287,12 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
             if data_sample:
                 data_sample, _ = redact_phi(data_sample)
 
-        session = FhirBridgeSession(settings, synth_model=model, intent_model=default_intent_model)
+        # persist=bool(user_id): guests get zero persistence, full stop -- that
+        # includes the graph's own checkpointer, not just the conversations
+        # table below, so a guest session must never open a Postgres connection.
+        session = FhirBridgeSession(
+            settings, synth_model=model, intent_model=default_intent_model, persist=bool(user_id)
+        )
         initial_message = compose_use_case(message, data_sample, req.data_format, req.terminology_system)
         outcome = await _run_agent_call(session.start, initial_message)
 
@@ -470,7 +477,9 @@ async def rerun_conversation(conversation_id: str, authorization: str | None = H
     # conversation happened to use -- rerunning is not a way to keep re-using
     # an old per-conversation choice from before model selection was removed.
     default_intent_model, model = _resolve_model_defaults(settings)
-    session = FhirBridgeSession(settings, synth_model=model, intent_model=default_intent_model)
+    # persist=True: this route requires auth (_require_user_id above), never
+    # reachable by a guest.
+    session = FhirBridgeSession(settings, synth_model=model, intent_model=default_intent_model, persist=True)
     initial_message = compose_use_case(
         row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
     )
@@ -615,7 +624,9 @@ async def admin_rerun_conversation(
     # Intent gate stays on the admin-configured default regardless -- only
     # the synthesis model is under test here.
     default_intent_model, _default_synth_model = _resolve_model_defaults(settings)
-    session = FhirBridgeSession(settings, synth_model=req.model, intent_model=default_intent_model)
+    # persist=True: this route requires admin auth (_require_admin above),
+    # never reachable by a guest.
+    session = FhirBridgeSession(settings, synth_model=req.model, intent_model=default_intent_model, persist=True)
     initial_message = compose_use_case(
         row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
     )
