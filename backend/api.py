@@ -237,7 +237,7 @@ def _serialize_outcome(outcome) -> dict:
     if isinstance(outcome, OutOfScope):
         return {"kind": "out_of_scope", "reason": outcome.reason}
     if isinstance(outcome, ClarifyingQuestion):
-        return {"kind": "clarifying_question", "questions": outcome.questions}
+        return {"kind": "clarifying_question", "question": outcome.question, "options": outcome.options}
     if isinstance(outcome, FinalRecommendation):
         return {
             "kind": "final_recommendation",

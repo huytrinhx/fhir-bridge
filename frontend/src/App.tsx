@@ -217,6 +217,10 @@ export default function App() {
   const [finished, setFinished] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
   const [recommendation, setRecommendation] = useState<RecommendationState | null>(null);
+  // 2-4 option labels for the pending clarifying question, or null when it's
+  // open-ended (or there's no pending question) -- the free-text composer
+  // input below is always available either way (see submitAnswer).
+  const [pendingOptions, setPendingOptions] = useState<string[] | null>(null);
   const [dataFormat, setDataFormat] = useState<string | null>(null);
   const [mappingPanelResourceType, setMappingPanelResourceType] = useState<string | null>(null);
   const [mappingCache, setMappingCache] = useState<Record<string, ResourceMappingResponse>>({});
@@ -319,12 +323,14 @@ export default function App() {
     setSessionId(res.session_id);
     if (res.kind === "out_of_scope") {
       appendMessage("assistant", `Out of scope: ${res.reason}`);
+      setPendingOptions(null);
       setFinished(true);
     } else if (res.kind === "clarifying_question") {
-      const questionText = res.questions.map((q, i) => `${i + 1}. ${q}`).join("\n");
-      appendMessage("assistant", `A few questions before I can recommend resources:\n${questionText}`);
+      appendMessage("assistant", res.question);
+      setPendingOptions(res.options);
     } else {
       appendMessage("assistant", "Here's what I found, categorized and cited in the panel →");
+      setPendingOptions(null);
       setRecommendation({
         mustHave: res.must_have,
         potentiallyNeeded: res.potentially_needed,
@@ -399,6 +405,7 @@ export default function App() {
     setFinished(false);
     setReadOnly(false);
     setRecommendation(null);
+    setPendingOptions(null);
     setDataFormat(null);
     setMappingPanelResourceType(null);
     setMappingCache({});
@@ -438,6 +445,7 @@ export default function App() {
     setFinished(false);
     setReadOnly(false);
     setRecommendation(null);
+    setPendingOptions(null);
     setDataFormat(null);
     setMappingPanelResourceType(null);
     setMappingCache({});
@@ -487,13 +495,15 @@ export default function App() {
     }
   }
 
-  async function handleContinue(e: FormEvent) {
-    e.preventDefault();
-    const text = input.trim();
+  // Shared by the free-text composer submit and clicking a clarifying-
+  // question option button -- both are just an answer, resuming the graph
+  // immediately with no separate submit step.
+  async function submitAnswer(text: string) {
     if (!text || loading || finished || readOnly || !sessionId) return;
 
     const myGeneration = ++generationRef.current;
     appendMessage("user", text);
+    setPendingOptions(null);
     setInput("");
     setLoading(true);
     setLiveStatus(null);
@@ -520,6 +530,15 @@ export default function App() {
     }
   }
 
+  function handleContinue(e: FormEvent) {
+    e.preventDefault();
+    void submitAnswer(input.trim());
+  }
+
+  function handleOptionClick(option: string) {
+    void submitAnswer(option);
+  }
+
   async function handleSelectHistory(id: string) {
     const myGeneration = ++generationRef.current;
     setError(null);
@@ -529,6 +548,7 @@ export default function App() {
       setMode("chat");
       setReadOnly(true);
       setFinished(true);
+      setPendingOptions(null);
       setSessionId(detail.id);
       setMessages(transcriptToMessages(detail.display_transcript));
       setDataFormat(detail.data_format);
@@ -562,6 +582,7 @@ export default function App() {
       setReadOnly(false);
       setFinished(false);
       setRecommendation(null);
+      setPendingOptions(null);
       setDataFormat(detail.data_format);
       setMappingPanelResourceType(null);
       setMappingCache({});
@@ -734,6 +755,20 @@ export default function App() {
                   <span className="bubble__text">{liveStatus ?? "Thinking…"}</span>
                 </div>
               )}
+              {pendingOptions && !loading && !finished && !readOnly && (
+                <div className="clarify-options" role="group" aria-label="Suggested answers">
+                  {pendingOptions.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className="clarify-options__button"
+                      onClick={() => handleOptionClick(option)}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div ref={threadEndRef} />
             </div>
 
@@ -749,7 +784,9 @@ export default function App() {
                     ? "Read-only — start a new conversation to continue"
                     : finished
                       ? "Start a new conversation to continue"
-                      : "Type your message…"
+                      : pendingOptions
+                        ? "Or type your own answer…"
+                        : "Type your message…"
                 }
                 disabled={loading || finished || readOnly}
               />

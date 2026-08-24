@@ -83,7 +83,7 @@ def test_full_round_trip_via_session(monkeypatch):
         [
             intent_response(in_scope=True),
             search_response("patient demographics"),
-            ask_response(["Need device tracking?"]),
+            ask_response("Need device tracking?"),
             submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
         ],
         chunks_by_query={"patient demographics": [PATIENT_CHUNK]},
@@ -91,7 +91,8 @@ def test_full_round_trip_via_session(monkeypatch):
 
     outcome = session.start("raw patient registration feed")
     assert isinstance(outcome, ClarifyingQuestion)
-    assert outcome.questions == ["Need device tracking?"]
+    assert outcome.question == "Need device tracking?"
+    assert outcome.options is None
 
     final = session.respond("No device tracking needed.")
     assert isinstance(final, FinalRecommendation)

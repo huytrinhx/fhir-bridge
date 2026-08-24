@@ -56,7 +56,7 @@ def test_build_display_transcript_extracts_search_question_and_answer():
                     "type": "tool_use",
                     "id": "toolu_2",
                     "name": "ask_clarifying_question",
-                    "input": {"questions": ["Continuous or periodic readings?"]},
+                    "input": {"question": "Continuous or periodic readings?"},
                 },
             ],
         },
