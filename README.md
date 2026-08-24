@@ -179,34 +179,48 @@ tells Railway to build with that Dockerfile.
    on the volume from step 3 (the Railway CLI's `railway run` executes
    *locally* with Railway's env vars, which would write the whitelist to
    your own machine instead — use `railway ssh` so it runs in the deployed
-   container):
-   ```bash
-   railway ssh
-   # inside the container:
-   python -m ingestion.scripts.run_ingest
-   python -m ingestion.scripts.run_ingest_ig --package us_core
-   ```
-   Re-run these only when the corpus needs refreshing — the `data/`
-   directory persists on the volume across redeploys as long as it stays
-   attached.
+   container). If `railway ssh` says `No registered SSH keys found`, run
+   `ssh-keygen -t ed25519` (if you don't already have a key) then
+   `railway ssh keys add` once first.
 
-   If `fhir_kb_chunks` already exists from an ingest run before the switch
-   to OpenAI embeddings (`VECTOR(4096)`, Kyma/Qwen3), drop it first --
-   `CREATE TABLE IF NOT EXISTS` won't retrofit the column to the new
-   `VECTOR(1536)` width, and old and new embeddings aren't comparable
-   anyway. No `psql` client in the container image, so drop it via Python:
    ```bash
    railway ssh
-   # inside the container:
+   ```
+
+   Inside the container shell:
+
+   ```bash
+   # 1. Check current state first -- skip step 2 if this is a brand-new
+   #    deployment that's never been ingested (ensure_schema creates the
+   #    VECTOR(1536) table correctly on its own in that case).
+   python -c "
+   import os, psycopg
+   conn = psycopg.connect(os.environ['DATABASE_URL'], autocommit=True)
+   exists = conn.execute(\"SELECT count(*) FROM information_schema.tables WHERE table_name='fhir_kb_chunks'\").fetchone()[0]
+   print('fhir_kb_chunks exists:', bool(exists))
+   if exists:
+       print('dims:', conn.execute(\"SELECT atttypmod FROM pg_attribute a JOIN pg_class c ON a.attrelid=c.oid WHERE c.relname='fhir_kb_chunks' AND a.attname='embedding'\").fetchone())
+       print('rows:', conn.execute('SELECT count(*) FROM fhir_kb_chunks').fetchone())
+   "
+
+   # 2. Only if step 1 showed dims=4096 (old Kyma/Qwen3 embeddings, from
+   #    before the switch to OpenAI) -- drop it. CREATE TABLE IF NOT EXISTS
+   #    won't retrofit the column to the new VECTOR(1536) width, and old and
+   #    new embeddings aren't comparable anyway. No psql client in the
+   #    container image, so drop it via Python:
    python -c "
    import os, psycopg
    psycopg.connect(os.environ['DATABASE_URL'], autocommit=True).execute('DROP TABLE IF EXISTS fhir_kb_chunks;')
    "
+
+   # 3. Re-ingest
    python -m ingestion.scripts.run_ingest
    python -m ingestion.scripts.run_ingest_ig --package us_core
    ```
-   Skip the drop on a brand-new deployment that's never been ingested --
-   `ensure_schema` creates the `VECTOR(1536)` table correctly on its own.
+
+   Re-run step 3 only when the corpus needs refreshing — the `data/`
+   directory persists on the volume across redeploys as long as it stays
+   attached.
 
 Note: `_sessions` (guest conversations) and OAuth CSRF state are in-memory
 dicts (`backend/api.py`, `backend/google_oauth.py`), so this only works
