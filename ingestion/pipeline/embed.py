@@ -1,4 +1,6 @@
-"""Kyma API embedding client for KB chunks (OpenAI-compatible /embeddings)."""
+"""OpenAI embedding client for KB chunks -- talks to OpenAI's API directly,
+not through Kyma (which remains the LLM-inference provider elsewhere in this
+app)."""
 from __future__ import annotations
 
 from openai import OpenAI
@@ -7,13 +9,11 @@ from tqdm import tqdm
 from ingestion.config import Settings
 
 
-class KymaEmbedder:
+class OpenAIEmbedder:
     def __init__(self, settings: Settings, batch_size: int = 128):
-        if not settings.kyma_api_key:
-            raise RuntimeError("KYMA_API_KEY is not set")
-        self._client = OpenAI(
-            api_key=settings.kyma_api_key, base_url=settings.kyma_embeddings_base_url
-        )
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        self._client = OpenAI(api_key=settings.openai_api_key)
         self._model = settings.embedding_model
         self._batch_size = batch_size
 

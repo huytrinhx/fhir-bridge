@@ -29,14 +29,15 @@ class RetrievedChunk:
 
 class FhirRetriever:
     def __init__(self, settings: Settings):
-        if not settings.kyma_api_key:
-            raise RuntimeError("KYMA_API_KEY is not set")
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
         if not settings.database_url:
             raise RuntimeError("DATABASE_URL is not set")
-        self._embed_client = OpenAI(
-            api_key=settings.kyma_api_key, base_url=settings.kyma_embeddings_base_url
-        )
-        self._embedding_model = settings.embedding_model
+        # No base_url override -- talks directly to OpenAI's API, not Kyma
+        # (which remains the LLM-inference/chat-model-catalog provider, see
+        # backend/config.py).
+        self._embed_client = OpenAI(api_key=settings.openai_api_key)
+        self._embedding_model = settings.openai_embedding_model
         self._database_url = settings.database_url
 
     def _embed_query(self, query: str) -> list[float]:
