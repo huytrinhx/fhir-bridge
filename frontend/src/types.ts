@@ -68,6 +68,21 @@ export interface StartFields {
   terminology_system?: string | null;
 }
 
+// Live per-node status, from GET /api/messages/stream (SSE) -- and, with the
+// same shape, GET /api/messages/events (the polling fallback for a dropped
+// stream), so one renderer (see describeEvent in api.ts) covers both.
+export interface ProgressEvent {
+  node_name: string;
+  event_type: string;
+  input_data: unknown;
+  output_data: unknown;
+}
+
+export interface PolledProgressEvent extends ProgressEvent {
+  id: number;
+  ts: string;
+}
+
 export interface ConversationSummary {
   id: string;
   created_at: string;
