@@ -26,7 +26,9 @@ export default function LandingPage({ onGuest, onAuthenticated }: Props) {
             <h2>Continue as guest</h2>
             <p className="landing-card__body">
               No account, nothing saved. Your conversation lives only in memory for this
-              session — it's cleared the moment you close the tab, or after 20 minutes idle.
+              session — it's cleared the moment you close the tab, or after 20 minutes idle. If
+              something breaks mid-run, there's no crash recovery, no conversation history to come
+              back to, and your session isn't included in the production-study dataset.
             </p>
             <button type="button" className="landing-card__button" onClick={onGuest}>
               Continue as guest
@@ -37,8 +39,9 @@ export default function LandingPage({ onGuest, onAuthenticated }: Props) {
             <h2>Sign in</h2>
             <p className="landing-card__body">
               Your conversations and quality reports are saved to your account, so you can come
-              back to them later. Real patient identifiers in your own text are automatically
-              redacted before anything is stored or sent to the model.
+              back to them later, recover from a crash mid-run, and contribute to the
+              production-study dataset. Real patient identifiers in your own text are
+              automatically redacted before anything is stored or sent to the model.
             </p>
             <button
               type="button"
