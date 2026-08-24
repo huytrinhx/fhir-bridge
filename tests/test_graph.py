@@ -84,12 +84,20 @@ def search_response(query: str, tool_use_id: str = "search-1") -> FakeResponse:
     )
 
 
-def ask_response(question: str, options: list[str] | None = None, tool_use_id: str = "ask-1") -> FakeResponse:
-    input_: dict = {"question": question}
-    if options is not None:
-        input_["options"] = options
+def ask_response(
+    questions: list[str], options: list[list[str] | None] | None = None, tool_use_id: str = "ask-1"
+) -> FakeResponse:
+    """One ask_clarifying_question call batching `questions` -- `options[i]`
+    (if given) are that question's proposed option labels, None/absent for
+    a genuinely open-ended question."""
+    opts = options or [None] * len(questions)
+    items = [{"question": q, **({"options": o} if o else {})} for q, o in zip(questions, opts)]
     return FakeResponse(
-        content=[FakeBlock(type="tool_use", id=tool_use_id, name="ask_clarifying_question", input=input_)]
+        content=[
+            FakeBlock(
+                type="tool_use", id=tool_use_id, name="ask_clarifying_question", input={"questions": items}
+            )
+        ]
     )
 
 
@@ -225,7 +233,7 @@ def test_clarifying_question_pauses_and_resumes_via_interrupt():
     client = FakeAnthropicClient(
         [
             intent_response(in_scope=True),
-            ask_response("Do you need device identity tracked?"),
+            ask_response(["Do you need device identity tracked?"]),
             submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
         ]
     )
@@ -236,8 +244,7 @@ def test_clarifying_question_pauses_and_resumes_via_interrupt():
 
     assert "__interrupt__" in result1
     assert result1["__interrupt__"][0].value == {
-        "question": "Do you need device identity tracked?",
-        "options": None,
+        "questions": [{"question": "Do you need device identity tracked?", "options": None}],
     }
     assert result1.get("outcome") is None
     # The assistant's ask turn is already recorded even though we're paused.
@@ -254,13 +261,13 @@ def test_clarifying_question_pauses_and_resumes_via_interrupt():
     assert answer_message["content"][0]["tool_use_id"] == "ask-1"
 
 
-def test_clarifying_question_with_options_surfaces_them_in_the_interrupt():
+def test_clarifying_question_batch_can_mix_options_and_open_ended():
     client = FakeAnthropicClient(
         [
             intent_response(in_scope=True),
             ask_response(
-                "Does billing tie to an encounter?",
-                options=["Yes, always", "Sometimes", "No"],
+                ["Does billing tie to an encounter?", "Anything else unusual about this data source?"],
+                options=[["Yes, always", "Sometimes", "No"], None],
             ),
             submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
         ]
@@ -270,8 +277,10 @@ def test_clarifying_question_with_options_surfaces_them_in_the_interrupt():
     result1, _ = invoke(graph, start_payload("raw patient registration feed"))
 
     assert result1["__interrupt__"][0].value == {
-        "question": "Does billing tie to an encounter?",
-        "options": ["Yes, always", "Sometimes", "No"],
+        "questions": [
+            {"question": "Does billing tie to an encounter?", "options": ["Yes, always", "Sometimes", "No"]},
+            {"question": "Anything else unusual about this data source?", "options": None},
+        ],
     }
 
 
@@ -291,7 +300,7 @@ def test_search_co_occurring_with_ask_is_serviced_and_queued_as_pending():
                         type="tool_use",
                         id="ask-1",
                         name="ask_clarifying_question",
-                        input={"question": "Need billing ties?"},
+                        input={"questions": [{"question": "Need billing ties?"}]},
                     ),
                 ]
             ),
@@ -330,7 +339,7 @@ def test_turn_budget_resets_on_each_resumed_leg():
     responses = [intent_response(in_scope=True)]
     for i in range(pre_ask_turns):
         responses.append(search_response(f"pre-{i}", tool_use_id=f"pre-{i}"))
-    responses.append(ask_response("Need device tracking?"))
+    responses.append(ask_response(["Need device tracking?"]))
     for i in range(post_ask_turns):
         responses.append(search_response(f"post-{i}", tool_use_id=f"post-{i}"))
     responses.append(submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]))
@@ -407,7 +416,7 @@ def test_forcing_convergence_drops_search_tool_but_still_services_it():
 def test_ask_tool_withdrawn_after_max_clarification_rounds():
     responses = [intent_response(in_scope=True)]
     for i in range(MAX_CLARIFICATION_ROUNDS):
-        responses.append(ask_response(f"question {i}?", tool_use_id=f"ask-{i}"))
+        responses.append(ask_response([f"question {i}?"], tool_use_id=f"ask-{i}"))
     responses.append(submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]))
 
     client = FakeAnthropicClient(responses)
@@ -483,7 +492,7 @@ def test_event_logger_logs_clarification_once_per_round_not_on_pause():
     client = FakeAnthropicClient(
         [
             intent_response(in_scope=True),
-            ask_response("Need device tracking?"),
+            ask_response(["Need device tracking?"]),
             submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
         ]
     )
@@ -514,7 +523,7 @@ def test_postgres_checkpointer_persists_state_after_each_node():
     client = FakeAnthropicClient(
         [
             intent_response(in_scope=True),
-            ask_response("Need device tracking?"),
+            ask_response(["Need device tracking?"]),
             submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
         ]
     )

@@ -16,6 +16,7 @@ import {
 import { clearToken, getToken, setToken } from "./auth";
 import type {
   AuthUser,
+  ClarifyingQuestionItem,
   ConversationSummary,
   DisplayTranscriptEntry,
   MessageResponse,
@@ -26,6 +27,7 @@ import type {
 } from "./types";
 import InputPanel from "./components/InputPanel";
 import HistorySidebar from "./components/HistorySidebar";
+import ClarifyingQuestionDeck from "./components/ClarifyingQuestionDeck";
 import FeedbackModal from "./components/FeedbackModal";
 import AdminFeedback from "./components/AdminFeedback";
 import LandingPage from "./components/LandingPage";
@@ -217,10 +219,14 @@ export default function App() {
   const [finished, setFinished] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
   const [recommendation, setRecommendation] = useState<RecommendationState | null>(null);
-  // 2-4 option labels for the pending clarifying question, or null when it's
-  // open-ended (or there's no pending question) -- the free-text composer
-  // input below is always available either way (see submitAnswer).
-  const [pendingOptions, setPendingOptions] = useState<string[] | null>(null);
+  // The current batch of clarifying questions (null when there's none
+  // pending) -- rendered as a card deck (ClarifyingQuestionDeck) the user
+  // pages through and answers before a single combined resume. batchId is
+  // bumped on every new batch so the deck component remounts with fresh
+  // internal state (card index, per-card answers) instead of carrying over
+  // the previous batch's.
+  const [pendingQuestions, setPendingQuestions] = useState<ClarifyingQuestionItem[] | null>(null);
+  const [questionBatchId, setQuestionBatchId] = useState(0);
   const [dataFormat, setDataFormat] = useState<string | null>(null);
   const [mappingPanelResourceType, setMappingPanelResourceType] = useState<string | null>(null);
   const [mappingCache, setMappingCache] = useState<Record<string, ResourceMappingResponse>>({});
@@ -323,14 +329,20 @@ export default function App() {
     setSessionId(res.session_id);
     if (res.kind === "out_of_scope") {
       appendMessage("assistant", `Out of scope: ${res.reason}`);
-      setPendingOptions(null);
+      setPendingQuestions(null);
       setFinished(true);
     } else if (res.kind === "clarifying_question") {
-      appendMessage("assistant", res.question);
-      setPendingOptions(res.options);
+      appendMessage(
+        "assistant",
+        res.questions.length === 1
+          ? res.questions[0].question
+          : `${res.questions.length} follow-up questions before I can recommend resources:`,
+      );
+      setPendingQuestions(res.questions);
+      setQuestionBatchId((n) => n + 1);
     } else {
       appendMessage("assistant", "Here's what I found, categorized and cited in the panel →");
-      setPendingOptions(null);
+      setPendingQuestions(null);
       setRecommendation({
         mustHave: res.must_have,
         potentiallyNeeded: res.potentially_needed,
@@ -405,7 +417,7 @@ export default function App() {
     setFinished(false);
     setReadOnly(false);
     setRecommendation(null);
-    setPendingOptions(null);
+    setPendingQuestions(null);
     setDataFormat(null);
     setMappingPanelResourceType(null);
     setMappingCache({});
@@ -445,7 +457,7 @@ export default function App() {
     setFinished(false);
     setReadOnly(false);
     setRecommendation(null);
-    setPendingOptions(null);
+    setPendingQuestions(null);
     setDataFormat(null);
     setMappingPanelResourceType(null);
     setMappingCache({});
@@ -495,15 +507,18 @@ export default function App() {
     }
   }
 
-  // Shared by the free-text composer submit and clicking a clarifying-
-  // question option button -- both are just an answer, resuming the graph
-  // immediately with no separate submit step.
-  async function submitAnswer(text: string) {
+  // Shared by the free-text composer submit and submitting a clarifying-
+  // question card deck -- both resume the graph immediately with no
+  // separate submit step. displayText (defaults to text) is what's shown in
+  // the chat thread's "user" bubble -- for a card deck this is a friendlier
+  // per-question summary, while `text` is the fuller Q/A-labeled version
+  // that actually resumes the graph.
+  async function submitAnswer(text: string, displayText?: string) {
     if (!text || loading || finished || readOnly || !sessionId) return;
 
     const myGeneration = ++generationRef.current;
-    appendMessage("user", text);
-    setPendingOptions(null);
+    appendMessage("user", displayText ?? text);
+    setPendingQuestions(null);
     setInput("");
     setLoading(true);
     setLiveStatus(null);
@@ -535,10 +550,6 @@ export default function App() {
     void submitAnswer(input.trim());
   }
 
-  function handleOptionClick(option: string) {
-    void submitAnswer(option);
-  }
-
   async function handleSelectHistory(id: string) {
     const myGeneration = ++generationRef.current;
     setError(null);
@@ -548,7 +559,7 @@ export default function App() {
       setMode("chat");
       setReadOnly(true);
       setFinished(true);
-      setPendingOptions(null);
+      setPendingQuestions(null);
       setSessionId(detail.id);
       setMessages(transcriptToMessages(detail.display_transcript));
       setDataFormat(detail.data_format);
@@ -582,7 +593,7 @@ export default function App() {
       setReadOnly(false);
       setFinished(false);
       setRecommendation(null);
-      setPendingOptions(null);
+      setPendingQuestions(null);
       setDataFormat(detail.data_format);
       setMappingPanelResourceType(null);
       setMappingCache({});
@@ -755,19 +766,12 @@ export default function App() {
                   <span className="bubble__text">{liveStatus ?? "Thinking…"}</span>
                 </div>
               )}
-              {pendingOptions && !loading && !finished && !readOnly && (
-                <div className="clarify-options" role="group" aria-label="Suggested answers">
-                  {pendingOptions.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      className="clarify-options__button"
-                      onClick={() => handleOptionClick(option)}
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
+              {pendingQuestions && !loading && !finished && !readOnly && (
+                <ClarifyingQuestionDeck
+                  key={questionBatchId}
+                  questions={pendingQuestions}
+                  onSubmit={(combined, summary) => void submitAnswer(combined, summary)}
+                />
               )}
               <div ref={threadEndRef} />
             </div>
@@ -784,13 +788,16 @@ export default function App() {
                     ? "Read-only — start a new conversation to continue"
                     : finished
                       ? "Start a new conversation to continue"
-                      : pendingOptions
-                        ? "Or type your own answer…"
+                      : pendingQuestions
+                        ? "Answer the questions above to continue"
                         : "Type your message…"
                 }
-                disabled={loading || finished || readOnly}
+                disabled={loading || finished || readOnly || pendingQuestions !== null}
               />
-              <button type="submit" disabled={loading || finished || readOnly || !input.trim()}>
+              <button
+                type="submit"
+                disabled={loading || finished || readOnly || pendingQuestions !== null || !input.trim()}
+              >
                 Send
               </button>
             </form>

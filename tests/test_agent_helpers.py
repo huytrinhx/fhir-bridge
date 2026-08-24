@@ -56,7 +56,7 @@ def test_build_display_transcript_extracts_search_question_and_answer():
                     "type": "tool_use",
                     "id": "toolu_2",
                     "name": "ask_clarifying_question",
-                    "input": {"question": "Continuous or periodic readings?"},
+                    "input": {"questions": [{"question": "Continuous or periodic readings?"}]},
                 },
             ],
         },
@@ -76,6 +76,31 @@ def test_build_display_transcript_extracts_search_question_and_answer():
     assert "vital signs" in transcript[1]["text"]
     assert transcript[2]["text"] == "Continuous or periodic readings?"
     assert transcript[3]["text"] == "Periodic, every 5 minutes."
+
+
+def test_build_display_transcript_joins_a_batched_question():
+    messages = [
+        {"role": "user", "content": "x"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "ask_clarifying_question",
+                    "input": {
+                        "questions": [
+                            {"question": "Continuous or periodic readings?"},
+                            {"question": "Does billing tie to an encounter?", "options": ["Yes", "No"]},
+                        ]
+                    },
+                },
+            ],
+        },
+    ]
+
+    transcript = build_display_transcript(messages)
+    assert transcript[1]["text"] == "Continuous or periodic readings? / Does billing tie to an encounter?"
 
 
 def test_build_display_transcript_skips_search_result_dumps():
