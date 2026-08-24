@@ -166,9 +166,10 @@ tells Railway to build with that Dockerfile.
    (`backend/config.py`); without a volume it would need re-ingesting after
    every redeploy, since container filesystems are ephemeral otherwise.
 4. **Set environment variables** on the service (see `.env.example` for what
-   each does): `DATABASE_URL`, `KYMA_API_KEY`, `SECRET_KEY`, and once you
-   know the service's Railway domain, `FRONTEND_ORIGIN=https://<that
-   domain>` and `GOOGLE_REDIRECT_URI=https://<that domain>/api/auth/google/callback`
+   each does): `DATABASE_URL`, `KYMA_API_KEY`, `OPENAI_API_KEY` (KB
+   embeddings), `SECRET_KEY`, and once you know the service's Railway
+   domain, `FRONTEND_ORIGIN=https://<that domain>` and
+   `GOOGLE_REDIRECT_URI=https://<that domain>/api/auth/google/callback`
    (also register the same redirect URI in the Google Cloud Console OAuth
    client). Add `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`RESEND_API_KEY`
    if you want social login / feedback emails.
@@ -188,6 +189,24 @@ tells Railway to build with that Dockerfile.
    Re-run these only when the corpus needs refreshing — the `data/`
    directory persists on the volume across redeploys as long as it stays
    attached.
+
+   If `fhir_kb_chunks` already exists from an ingest run before the switch
+   to OpenAI embeddings (`VECTOR(4096)`, Kyma/Qwen3), drop it first --
+   `CREATE TABLE IF NOT EXISTS` won't retrofit the column to the new
+   `VECTOR(1536)` width, and old and new embeddings aren't comparable
+   anyway. No `psql` client in the container image, so drop it via Python:
+   ```bash
+   railway ssh
+   # inside the container:
+   python -c "
+   import os, psycopg
+   psycopg.connect(os.environ['DATABASE_URL'], autocommit=True).execute('DROP TABLE IF EXISTS fhir_kb_chunks;')
+   "
+   python -m ingestion.scripts.run_ingest
+   python -m ingestion.scripts.run_ingest_ig --package us_core
+   ```
+   Skip the drop on a brand-new deployment that's never been ingested --
+   `ensure_schema` creates the `VECTOR(1536)` table correctly on its own.
 
 Note: `_sessions` (guest conversations) and OAuth CSRF state are in-memory
 dicts (`backend/api.py`, `backend/google_oauth.py`), so this only works
