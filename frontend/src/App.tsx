@@ -1,13 +1,17 @@
 import { useState, useRef, useEffect, type FormEvent } from "react";
 import {
+  describeEvent,
+  fetchEvents,
   getConversation,
   getCurrentUser,
   getResourceMapping,
   listConversations,
+  openProgressStream,
   postMessage,
   rerunConversation,
   startConversation,
   submitFeedback,
+  waitForOpen,
 } from "./api";
 import { clearToken, getToken, setToken } from "./auth";
 import type {
@@ -15,6 +19,7 @@ import type {
   ConversationSummary,
   DisplayTranscriptEntry,
   MessageResponse,
+  ProgressEvent,
   RecommendationItem,
   ResourceMappingResponse,
   StartFields,
@@ -203,6 +208,11 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  // Live per-node status text for the loading bubble (issue #4) -- null
+  // falls back to the static "Thinking…" text, e.g. before the first event
+  // arrives or once a turn finishes.
+  const [liveStatus, setLiveStatus] = useState<string | null>(null);
+  const pollIntervalRef = useRef<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [finished, setFinished] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
@@ -325,6 +335,58 @@ export default function App() {
     }
   }
 
+  // Opens the live-progress SSE stream for one in-flight turn (issue #4) and
+  // returns a stop() to close it -- called from handleStart/handleContinue,
+  // torn down in their existing finally blocks alongside setLoading(false).
+  // Guarded by generationRef the same way every other async update in this
+  // file is: a stale event/poll from a superseded request must not touch
+  // liveStatus.
+  function beginLiveProgress(progressSessionId: string, myGeneration: number) {
+    const es = openProgressStream(progressSessionId);
+
+    es.onmessage = (e) => {
+      if (generationRef.current !== myGeneration) return;
+      try {
+        setLiveStatus(describeEvent(JSON.parse(e.data) as ProgressEvent));
+      } catch {
+        // Malformed frame -- ignore, the static "Thinking…" text stays put.
+      }
+    };
+
+    es.onerror = () => {
+      // EventSource auto-reconnects by default -- close it so we own the
+      // fallback from here instead of racing our own polling against the
+      // browser's silent retries.
+      es.close();
+      if (generationRef.current !== myGeneration) return;
+      if (!authUser) return; // guests: nothing persisted to poll, degrade to the static bubble
+      if (pollIntervalRef.current != null) return; // already polling
+
+      let afterId = 0;
+      pollIntervalRef.current = window.setInterval(async () => {
+        try {
+          const events = await fetchEvents(progressSessionId, afterId);
+          if (generationRef.current !== myGeneration || events.length === 0) return;
+          afterId = events[events.length - 1].id;
+          setLiveStatus(describeEvent(events[events.length - 1]));
+        } catch {
+          // Transient poll failure -- retry next tick.
+        }
+      }, 2000);
+    };
+
+    return {
+      es,
+      stop: () => {
+        es.close();
+        if (pollIntervalRef.current != null) {
+          window.clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+      },
+    };
+  }
+
   function startNewConversation() {
     generationRef.current += 1; // invalidate any in-flight request from the conversation being left
     setMode("input");
@@ -332,6 +394,7 @@ export default function App() {
     setMessages([]);
     setInput("");
     setLoading(false);
+    setLiveStatus(null);
     setError(null);
     setFinished(false);
     setReadOnly(false);
@@ -370,6 +433,7 @@ export default function App() {
     setMessages([]);
     setInput("");
     setLoading(false);
+    setLiveStatus(null);
     setError(null);
     setFinished(false);
     setReadOnly(false);
@@ -391,9 +455,17 @@ export default function App() {
     setMappingCache({});
     setMappingError(null);
     setLoading(true);
+    setLiveStatus(null);
     setError(null);
+    // Client-generated, not server-generated: the SSE stream needs a
+    // session_id to subscribe with *before* startConversation's (blocking)
+    // POST resolves -- the server can't hand one back any earlier than that
+    // otherwise. See MessageRequest.client_session_id in backend/api.py.
+    const clientSessionId = crypto.randomUUID();
+    const { es, stop } = beginLiveProgress(clientSessionId, myGeneration);
     try {
-      const outcome = await startConversation(fields);
+      await waitForOpen(es);
+      const outcome = await startConversation(fields, clientSessionId);
       if (generationRef.current !== myGeneration) return; // superseded (e.g. New conversation clicked meanwhile)
       applyOutcome(outcome);
     } catch (err) {
@@ -406,7 +478,11 @@ export default function App() {
       setFinished(true);
       setSessionId(null);
     } finally {
-      if (generationRef.current === myGeneration) setLoading(false);
+      stop();
+      if (generationRef.current === myGeneration) {
+        setLoading(false);
+        setLiveStatus(null);
+      }
       if (authUser) refreshHistory();
     }
   }
@@ -420,8 +496,13 @@ export default function App() {
     appendMessage("user", text);
     setInput("");
     setLoading(true);
+    setLiveStatus(null);
     setError(null);
+    // sessionId is already known here (unlike handleStart) -- no client-
+    // generated id needed, just open the stream before firing the POST.
+    const { es, stop } = beginLiveProgress(sessionId, myGeneration);
     try {
+      await waitForOpen(es);
       const outcome = await postMessage(sessionId, text);
       if (generationRef.current !== myGeneration) return;
       applyOutcome(outcome);
@@ -430,7 +511,11 @@ export default function App() {
       setError(err instanceof Error ? err.message : "something went wrong");
       setFinished(true);
     } finally {
-      if (generationRef.current === myGeneration) setLoading(false);
+      stop();
+      if (generationRef.current === myGeneration) {
+        setLoading(false);
+        setLiveStatus(null);
+      }
       if (authUser) refreshHistory();
     }
   }
@@ -646,7 +731,7 @@ export default function App() {
               ))}
               {loading && (
                 <div className="bubble bubble--assistant bubble--loading">
-                  <span className="bubble__text">Thinking…</span>
+                  <span className="bubble__text">{liveStatus ?? "Thinking…"}</span>
                 </div>
               )}
               <div ref={threadEndRef} />

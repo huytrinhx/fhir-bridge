@@ -96,6 +96,20 @@ INSERT INTO decision_events (session_id, node_name, event_type, input_json, outp
 VALUES (%(session_id)s, %(node_name)s, %(event_type)s, %(input_json)s, %(output_json)s);
 """
 
+# input_data/output_data (not input_json/output_json) -- the SSE endpoint's
+# live payload (backend/event_stream.py::publish) uses those key names, so
+# the polling fallback in backend/api.py can feed either source through the
+# same frontend renderer without a key-name mismatch.
+LIST_EVENTS_SQL = """
+SELECT id, node_name, event_type, input_json AS input_data, output_json AS output_data, ts
+FROM decision_events
+WHERE session_id = %(session_id)s AND id > %(after_id)s
+ORDER BY id ASC
+LIMIT %(limit)s;
+"""
+
+DEFAULT_EVENTS_LIMIT = 500
+
 INSERT_PASSWORD_USER_SQL = """
 INSERT INTO users (id, username, email, password_hash, display_name)
 VALUES (%(id)s, %(username)s, %(email)s, %(password_hash)s, %(username)s)
@@ -384,6 +398,17 @@ class EventLogger:
             )
         finally:
             conn.close()
+
+
+def list_events(
+    conn: psycopg.Connection, *, session_id: str, after_id: int = 0, limit: int = DEFAULT_EVENTS_LIMIT
+) -> list[dict[str, Any]]:
+    """Rows after after_id (exclusive), oldest first -- the polling fallback
+    for a dropped SSE connection (backend/api.py's GET /api/messages/events)
+    calls this with the highest id it's already seen."""
+    with conn.cursor() as cur:
+        cur.execute(LIST_EVENTS_SQL, {"session_id": session_id, "after_id": after_id, "limit": limit})
+        return cur.fetchall()
 
 
 def list_conversations(

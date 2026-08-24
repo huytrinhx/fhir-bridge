@@ -18,23 +18,25 @@ Two usage modes, chosen on the frontend's landing page:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 
 import anthropic
 import psycopg
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import auth, google_oauth, persistence
+from backend import auth, event_stream, google_oauth, persistence
 from backend.agent import (
     ClarifyingQuestion,
     FhirBridgeSession,
@@ -60,6 +62,9 @@ FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 GUEST_IDLE_TIMEOUT_SECONDS = 20 * 60
 SWEEP_INTERVAL_SECONDS = 120
+# ~15-20s per issue #4: frequent enough to beat Railway's idle-connection
+# timeout risk (reports converge on 5-15 min) with plenty of margin.
+SSE_HEARTBEAT_SECONDS = 15.0
 
 _sessions: dict[str, FhirBridgeSession] = {}
 _session_models: dict[str, str] = {}
@@ -70,6 +75,12 @@ _session_last_active: dict[str, float] = {}
 # guest session (nothing persisted) or for an authenticated session before
 # its first _persist() call.
 _session_data_samples: dict[str, tuple[str | None, str | None]] = {}
+# user_id (None for guests) that created each live session -- lets GET
+# /api/messages/events (backend/persistence.py's decision_events, a durable
+# table) authorize a poll for a conversation whose first turn hasn't
+# finished yet, i.e. before a conversations row exists to check ownership
+# against the normal way (see that endpoint).
+_session_owners: dict[str, str | None] = {}
 
 
 async def _sweep_idle_sessions() -> None:
@@ -88,10 +99,12 @@ async def _sweep_idle_sessions() -> None:
             _session_models.pop(sid, None)
             _session_last_active.pop(sid, None)
             _session_data_samples.pop(sid, None)
+            _session_owners.pop(sid, None)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    event_stream.bind_loop(asyncio.get_running_loop())
     sweep_task = asyncio.create_task(_sweep_idle_sessions())
     yield
     sweep_task.cancel()
@@ -114,6 +127,12 @@ class MessageRequest(BaseModel):
     data_sample: str | None = None
     data_format: str | None = None
     terminology_system: str | None = None
+    # Client-generated id for a brand-new conversation's first turn, so the
+    # frontend can open GET /api/messages/stream *before* this POST resolves
+    # -- the server otherwise only hands back a session_id once the whole
+    # (blocking) turn is done, which is too late to watch it live. Only
+    # consulted when session_id is None; see post_message's create branch.
+    client_session_id: str | None = None
     # No client-supplied model override -- cost-risk control. Every
     # conversation uses the admin-configured default (_resolve_model_defaults),
     # never a per-request choice.
@@ -175,6 +194,19 @@ def _require_admin(authorization: str | None, settings) -> str:
     if user is None or not auth.is_admin_email(user.get("username"), user.get("email"), settings.admin_email):
         raise HTTPException(status_code=403, detail="admin access required")
     return user_id
+
+
+def _valid_uuid(value: str | None) -> str | None:
+    """Canonicalizes a client-supplied session id, or None if it isn't one --
+    defends decision_events.session_id (a UUID column) against garbage
+    without surfacing a user-facing error; callers fall back to generating
+    their own id instead."""
+    if value is None:
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
 
 
 def _resolve_model_defaults(settings) -> tuple[str, str]:
@@ -277,7 +309,7 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
 
     if req.session_id is None:
         settings = load_settings()
-        conversation_id = str(uuid.uuid4())
+        conversation_id = _valid_uuid(req.client_session_id) or str(uuid.uuid4())
         default_intent_model, model = _resolve_model_defaults(settings)
 
         message = req.message
@@ -304,6 +336,7 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
         _session_models[conversation_id] = model
         _session_last_active[conversation_id] = time.time()
         _session_data_samples[conversation_id] = (req.data_format, data_sample)
+        _session_owners[conversation_id] = user_id
 
         if user_id:
             _persist(
@@ -346,6 +379,99 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
             model=_session_models.get(req.session_id, load_settings().synth_model),
         )
     return {"session_id": req.session_id, **_serialize_outcome(outcome)}
+
+
+async def _progress_events(session_id: str, is_disconnected) -> AsyncIterator[str]:
+    """The actual SSE body, factored out of stream_messages() below so it's
+    unit-testable by calling it directly with a fake is_disconnected --
+    Starlette's TestClient fully buffers a streamed ASGI response before
+    returning it, so it hangs forever against a genuinely never-ending
+    response like this one; testing this generator directly sidesteps that
+    entirely (see tests/test_api.py).
+
+    is_disconnected is FastAPI's Request.is_disconnected in production --
+    threaded through as a parameter rather than closing over `request`
+    directly, for exactly that testability.
+    """
+    queue = event_stream.subscribe(session_id)
+    try:
+        while True:
+            if await is_disconnected():
+                break
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=SSE_HEARTBEAT_SECONDS)
+            except TimeoutError:
+                yield ": heartbeat\n\n"
+                continue
+            yield f"data: {json.dumps(event)}\n\n"
+    finally:
+        event_stream.unsubscribe(session_id, queue)
+
+
+@app.get("/api/messages/stream")
+async def stream_messages(session_id: str, request: Request) -> StreamingResponse:
+    """Live per-node status for an in-flight graph run (issue #4) -- sourced
+    from the same event_logger.log() calls backend/graph.py's nodes already
+    make for decision_events (issue #2), broadcast in-process rather than
+    read back from Postgres (backend/event_stream.py). No auth: the
+    browser's native EventSource API can't set an Authorization header at
+    all, so this endpoint treats session_id as a capability token, exactly
+    like every other _sessions lookup in this file (e.g. respond()'s
+    session_id lookup above has no ownership check either).
+
+    Callers must subscribe before triggering the graph run they want to
+    watch -- publish() is fire-and-forget, nothing is buffered for a session
+    with no open connection yet.
+    """
+    return StreamingResponse(
+        _progress_events(session_id, request.is_disconnected),
+        media_type="text/event-stream",
+        # X-Accel-Buffering: no is cheap insurance against a proxy buffering
+        # the heartbeat bytes and silently reintroducing the idle-timeout
+        # risk this endpoint exists to avoid, even though Railway's own
+        # proxy is confirmed non-buffering (see agents.md).
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+_MISSING = object()
+
+
+@app.get("/api/messages/events")
+def list_message_events(session_id: str, after_id: int = 0, authorization: str | None = Header(None)) -> dict:
+    """Polling fallback for a dropped SSE connection (issue #4): reads the
+    same decision_events rows issue #2 persists. Unlike the live stream
+    above, this reads a durable table, so it follows this app's user_id-
+    scoped-read pattern (like GET /api/conversations/{id}) rather than the
+    capability-token pattern the ephemeral _sessions map uses -- guests
+    (no Bearer token) 401 here, same as every other persisted-read endpoint;
+    nothing to recover for them anyway, since nothing was ever persisted.
+    """
+    user_id = _require_user_id(authorization)
+    settings = load_settings()
+
+    owner = _session_owners.get(session_id, _MISSING)
+    if owner is _MISSING:
+        # Not (or no longer) in memory -- e.g. this process restarted since
+        # the session was created. Fall back to the persisted conversation
+        # row, which by now may exist even if _session_owners doesn't.
+        conn = persistence.get_connection(settings)
+        try:
+            row = persistence.get_conversation(conn, session_id, user_id)
+        finally:
+            conn.close()
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown session_id")
+    elif owner != user_id:
+        # 404, not 403 -- don't confirm another user's session_id exists.
+        raise HTTPException(status_code=404, detail="unknown session_id")
+
+    conn = persistence.get_connection(settings)
+    try:
+        events = persistence.list_events(conn, session_id=session_id, after_id=after_id)
+    finally:
+        conn.close()
+    return {"events": events}
 
 
 @app.post("/api/auth/signup")
@@ -495,6 +621,7 @@ async def rerun_conversation(conversation_id: str, authorization: str | None = H
     _session_models[new_id] = model
     _session_last_active[new_id] = time.time()
     _session_data_samples[new_id] = (row["data_format"], row["data_sample"])
+    _session_owners[new_id] = user_id
     _persist(
         new_id,
         session,
@@ -646,6 +773,7 @@ async def admin_rerun_conversation(
     _session_data_samples[new_id] = (row["data_format"], row["data_sample"])
     # Persisted under the admin's own account -- this is the admin's
     # diagnostic run, not a modification of the original reporter's history.
+    _session_owners[new_id] = admin_user_id
     _persist(
         new_id,
         session,
