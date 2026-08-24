@@ -71,6 +71,29 @@ CREATE TABLE IF NOT EXISTS app_settings (
     synth_model TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Event-sourcing-style decision log for the LangGraph orchestration
+-- (backend/graph.py): one rollup row per node per visit, plus one row per
+-- individual search_fhir_kb call within retrieval (a single retrieval node
+-- can fire several searches in one turn). Append-only, no FK to
+-- conversations -- rows are written as the graph runs, which is before the
+-- conversation row itself necessarily exists.
+CREATE TABLE IF NOT EXISTS decision_events (
+    id BIGSERIAL PRIMARY KEY,
+    session_id UUID NOT NULL,
+    node_name TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    input_json JSONB,
+    output_json JSONB,
+    ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS decision_events_session_id_idx ON decision_events (session_id, ts);
+"""
+
+INSERT_EVENT_SQL = """
+INSERT INTO decision_events (session_id, node_name, event_type, input_json, output_json)
+VALUES (%(session_id)s, %(node_name)s, %(event_type)s, %(input_json)s, %(output_json)s);
 """
 
 INSERT_PASSWORD_USER_SQL = """
@@ -299,6 +322,68 @@ def save_conversation(
             },
         )
     conn.commit()
+
+
+def record_event(
+    conn: psycopg.Connection,
+    *,
+    session_id: str,
+    node_name: str,
+    event_type: str,
+    input_data: Any = None,
+    output_data: Any = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            INSERT_EVENT_SQL,
+            {
+                "session_id": session_id,
+                "node_name": node_name,
+                "event_type": event_type,
+                "input_json": json.dumps(input_data) if input_data is not None else None,
+                "output_json": json.dumps(output_data) if output_data is not None else None,
+            },
+        )
+    conn.commit()
+
+
+class EventLogger:
+    """Writes decision_events rows synchronously, as the LangGraph
+    orchestration (backend/graph.py) reaches each decision point -- not
+    batched at the end of the run, so a crash after a given point still has
+    that point durably recorded.
+
+    Opens its own short-lived connection per log() call (same
+    connect-per-call style as the rest of this module, see the module
+    docstring) rather than reusing FhirBridgeSession's long-lived checkpoint
+    connection -- sharing that connection caused "another command is already
+    in progress" errors, since PostgresSaver keeps operations in flight on it
+    across a node's execution.
+
+    settings=None (guest sessions) makes every call a no-op: guests get zero
+    persistence, full stop, so a guest session's event_logger must never
+    reach Postgres (see agents.md).
+    """
+
+    def __init__(self, settings: Settings | None, session_id: str) -> None:
+        self._settings = settings
+        self._session_id = session_id
+
+    def log(self, node_name: str, event_type: str, *, input_data: Any = None, output_data: Any = None) -> None:
+        if self._settings is None:
+            return
+        conn = get_connection(self._settings)
+        try:
+            record_event(
+                conn,
+                session_id=self._session_id,
+                node_name=node_name,
+                event_type=event_type,
+                input_data=input_data,
+                output_data=output_data,
+            )
+        finally:
+            conn.close()
 
 
 def list_conversations(
