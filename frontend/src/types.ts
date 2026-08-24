@@ -49,9 +49,16 @@ export interface ResourceMappingResponse {
   unmapped_fields: UnmappedFieldEntry[];
 }
 
+export interface ClarifyingQuestionItem {
+  question: string;
+  // 2-4 short option labels, or null for a genuinely open-ended question --
+  // a free-text answer is always valid either way.
+  options: string[] | null;
+}
+
 export type MessageResponse =
   | { kind: "out_of_scope"; session_id: string; reason: string }
-  | { kind: "clarifying_question"; session_id: string; question: string; options: string[] | null }
+  | { kind: "clarifying_question"; session_id: string; questions: ClarifyingQuestionItem[] }
   | {
       kind: "final_recommendation";
       session_id: string;

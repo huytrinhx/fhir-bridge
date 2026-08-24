@@ -51,13 +51,19 @@ def main() -> int:
             return 0
 
         if isinstance(outcome, ClarifyingQuestion):
-            print(f"\n{outcome.question}")
-            if outcome.options:
-                for i, option in enumerate(outcome.options, start=1):
-                    print(f"  {i}. {option}")
-                print("  (or type a free-text answer)")
-            answer = input("\n> ")
-            outcome = session.respond(answer)
+            answers = []
+            for i, item in enumerate(outcome.questions, start=1):
+                print(f"\n{item.question}")
+                if item.options:
+                    for j, option in enumerate(item.options, start=1):
+                        print(f"  {j}. {option}")
+                    print("  (or type a free-text answer)")
+                answers.append(input("> "))
+            combined = "\n\n".join(
+                f"Q{i}: {item.question}\nA{i}: {answer}"
+                for i, (item, answer) in enumerate(zip(outcome.questions, answers), start=1)
+            )
+            outcome = session.respond(combined)
             continue
 
         raise AssertionError(f"unhandled outcome: {outcome!r}")
