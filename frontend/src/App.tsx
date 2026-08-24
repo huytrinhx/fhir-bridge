@@ -48,6 +48,14 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function citationDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
 const SIDEBAR_MIN_WIDTH = 180;
 const SIDEBAR_MAX_WIDTH = 440;
 const CHAT_MIN_WIDTH = 320;
@@ -72,27 +80,25 @@ function ResourceCard({
     <li className="resource-card">
       <div className="resource-card__header">
         <span className="resource-card__type">{item.resource_type}</span>
-        <div className="resource-card__actions">
-          {onViewPayload && (
-            <button
-              type="button"
-              className="resource-card__view-payload"
-              onClick={() => onViewPayload(item.resource_type)}
-            >
-              View suggested payload
-            </button>
-          )}
-          <a
-            className="resource-card__source"
-            href={item.citation.url}
-            target="_blank"
-            rel="noreferrer"
+        {onViewPayload && (
+          <button
+            type="button"
+            className="resource-card__view-payload"
+            onClick={() => onViewPayload(item.resource_type)}
           >
-            source ↗
-          </a>
-        </div>
+            View suggested payload
+          </button>
+        )}
       </div>
-      <p className="resource-card__rationale">{item.rationale}</p>
+      <p className="resource-card__rationale">
+        {item.rationale}
+        <sup className="resource-card__marker">†</sup>
+      </p>
+      <a className="resource-card__footnote" href={item.citation.url} target="_blank" rel="noreferrer">
+        <span className="resource-card__footnote-marker">†</span>
+        <span className="resource-card__footnote-domain">{citationDomain(item.citation.url)}</span>
+        <span>↗</span>
+      </a>
     </li>
   );
 }
@@ -117,7 +123,9 @@ function RecommendationPanel({
   return (
     <div className="panel">
       <section>
-        <h2>Must-have</h2>
+        <h2>
+          <span className="panel__clause">§1</span> Must-have
+        </h2>
         {state.mustHave.length === 0 ? (
           <p className="panel__muted">None</p>
         ) : (
@@ -130,7 +138,9 @@ function RecommendationPanel({
       </section>
 
       <section>
-        <h2>Potentially needed</h2>
+        <h2>
+          <span className="panel__clause">§2</span> Potentially needed
+        </h2>
         {state.potentiallyNeeded.length === 0 ? (
           <p className="panel__muted">None</p>
         ) : (
@@ -144,7 +154,9 @@ function RecommendationPanel({
 
       {state.dropped.length > 0 && (
         <section className="panel__dropped">
-          <h2>Not included</h2>
+          <h2>
+            <span className="panel__clause">§3</span> Not included
+          </h2>
           <p className="panel__muted">
             These were considered but couldn't be verified against the FHIR R4 spec this turn,
             so they were left out rather than guessed:
@@ -595,7 +607,10 @@ export default function App() {
 
       <div className="chat-column">
         <header className="chat-header">
-          <h1>FHIR Bud</h1>
+          <h1>
+            <span className="wordmark-mark" aria-hidden="true" />
+            FHIR Bud
+          </h1>
           <div className="chat-header__actions">
             {!isGuest && finished && sessionId && !readOnly && (
               <button type="button" className="secondary-button" onClick={() => handleRerun(sessionId)}>
