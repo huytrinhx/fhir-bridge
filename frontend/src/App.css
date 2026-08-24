@@ -208,6 +208,31 @@
   text-align: left;
 }
 
+.clarify-options {
+  align-self: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 72%;
+}
+
+.clarify-options__button {
+  font: inherit;
+  font-size: 14px;
+  color: var(--text-h);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.clarify-options__button:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
 .composer {
   display: flex;
   gap: 8px;
