@@ -97,8 +97,8 @@ def build_display_transcript(messages: list[dict]) -> list[dict]:
                     query = block.get("input", {}).get("query", "")
                     entries.append({"role": role, "kind": "search", "text": f"Searched: {query!r}"})
                 elif block.get("name") == "ask_clarifying_question":
-                    question = block.get("input", {}).get("question", "")
-                    entries.append({"role": role, "kind": "question", "text": question})
+                    questions = [q["question"] for q in block.get("input", {}).get("questions", [])]
+                    entries.append({"role": role, "kind": "question", "text": " / ".join(questions)})
             elif block_type == "tool_result":
                 source_tool = tool_name_by_id.get(block.get("tool_use_id", ""))
                 text = block.get("content", "")
@@ -116,12 +116,21 @@ class OutOfScope:
 
 
 @dataclass(frozen=True)
-class ClarifyingQuestion:
+class ClarifyingQuestionItem:
     question: str
-    # 2-4 short option labels the model judged the question option-worthy
+    # 2-4 short option labels the model judged this question option-worthy
     # enough to propose, or None for a genuinely open-ended question -- a
     # free-text answer is always valid either way (see respond()).
     options: list[str] | None
+
+
+@dataclass(frozen=True)
+class ClarifyingQuestion:
+    # The whole batch from one ask_clarifying_question call -- respond()
+    # still takes a single combined answer string (the tool contract is one
+    # tool_result per tool_use call), composed client-side from however the
+    # user answered each item in the batch.
+    questions: list[ClarifyingQuestionItem]
 
 
 @dataclass(frozen=True)
@@ -253,7 +262,11 @@ class FhirBridgeSession:
         if result.get("__interrupt__"):
             self._awaiting_answer = True
             ask_block = result["ask_block"]
-            return ClarifyingQuestion(question=ask_block["question"], options=ask_block["options"])
+            questions = [
+                ClarifyingQuestionItem(question=q["question"], options=q["options"])
+                for q in ask_block["questions"]
+            ]
+            return ClarifyingQuestion(questions=questions)
 
         self._awaiting_answer = False
         outcome = result["outcome"]

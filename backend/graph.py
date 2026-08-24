@@ -8,9 +8,11 @@ contract):
     or (if it calls no tool) get nudged to try again.
   - retrieval: services every search_fhir_kb call from the latest reasoning
     turn against the FHIR KB, updating the citation ledger.
-  - clarification: surfaces ask_clarifying_question's question (plus any
-    proposed options) and pauses the graph (via interrupt()) until respond()
-    supplies an answer -- either a selected option's label or free text.
+  - clarification: surfaces ask_clarifying_question's whole batch of
+    questions (plus any proposed per-question options) and pauses the graph
+    (via interrupt()) until respond() supplies a single combined answer
+    covering the batch -- composed client-side from whatever mix of
+    selected options and free text the user gave each question.
 
 State only ever holds JSON-plain data (dicts/lists/strings/ints), never SDK
 objects or the CitationLedger/FhirRetriever/Anthropic client instances --
@@ -34,10 +36,10 @@ from backend.retrieval import FhirRetriever, RetrievedChunk
 
 MAX_TOOL_LOOP_TURNS = 6
 MAX_FORCE_ATTEMPTS = 3
-# One question per round now, not up to 3 bundled -- raised from 2 so the
-# total number of clarifying exchanges available across a conversation
-# (previously up to 2 rounds x 3 bundled questions = 6) isn't reduced.
-MAX_CLARIFICATION_ROUNDS = 6
+# Not a UX target -- the model is meant to converge well before this. It's a
+# safety ceiling against a runaway loop (and its API cost), now that nothing
+# else caps how many clarification round-trips a conversation can have.
+MAX_CLARIFICATION_ROUNDS = 20
 TOTAL_TURNS = MAX_TOOL_LOOP_TURNS + MAX_FORCE_ATTEMPTS
 
 NO_TOOL_USE_NUDGE = (
@@ -68,31 +70,44 @@ SEARCH_TOOL = {
 ASK_TOOL = {
     "name": "ask_clarifying_question",
     "description": (
-        "Ask the user one targeted follow-up question when there is genuine ambiguity "
-        "that would change which resources are must-have vs potentially-needed (e.g. "
-        "whether device identity needs tracking, whether billing ties to an encounter). "
-        "Ask only one question per call -- never bundle multiple questions into one "
-        "string; call this tool again on a later turn for a follow-up question instead. "
-        "If the question has a small, sensible set of discrete answers, propose 2-4 short "
-        "option labels the user can pick from -- but only when they'd genuinely cover the "
-        "likely answers; leave options out entirely for a genuinely open-ended question "
-        "rather than inventing artificial choices. The user can always type a free-text "
-        "answer instead of picking an option. Do not ask about anything that wouldn't "
-        "change the recommendation. Call this alone, not combined with "
-        "submit_recommendation in the same turn."
+        "Ask the user one or more targeted follow-up questions, batched into a single "
+        "call, when there is genuine ambiguity that would change which resources are "
+        "must-have vs potentially-needed (e.g. whether device identity needs tracking, "
+        "whether billing ties to an encounter). Batch every question you currently have "
+        "into this one call rather than trickling them out across separate turns -- the "
+        "user answers the whole batch at once, one question at a time with the ability to "
+        "go back and revise earlier answers before submitting. For each question, if it "
+        "has a small, sensible set of discrete answers, propose 2-4 short option labels "
+        "the user can pick from -- but only when they'd genuinely cover the likely "
+        "answers; leave options out entirely for a genuinely open-ended question rather "
+        "than inventing artificial choices. The user can always type a free-text answer "
+        "instead of picking an option, for any question in the batch. Do not ask about "
+        "anything that wouldn't change the recommendation. Call this alone, not combined "
+        "with submit_recommendation in the same turn."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "question": {"type": "string", "minLength": 1},
-            "options": {
+            "questions": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "minItems": 2,
-                "maxItems": 4,
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "minLength": 1},
+                        "options": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "minItems": 2,
+                            "maxItems": 4,
+                        },
+                    },
+                    "required": ["question"],
+                },
             },
         },
-        "required": ["question"],
+        "required": ["questions"],
     },
 }
 
@@ -171,12 +186,17 @@ never state an actual code from that system -- there is no ingested terminology 
 verify one against, so a specific code would be just as invented as a fabricated resource \
 name.
 - If there is genuine ambiguity that would change the must-have/potentially-needed split, \
-call ask_clarifying_question with one targeted question at a time instead of guessing. If \
-the question has a small set of sensible discrete answers, include 2-4 short options; \
-leave options out for a genuinely open-ended question rather than inventing artificial \
-choices. Only do this up to {MAX_CLARIFICATION_ROUNDS} rounds total -- after that the tool \
-will no longer be available and you must submit your best recommendation with what you \
-have, noting remaining uncertainty in the rationale.
+call ask_clarifying_question instead of guessing. Batch every question you currently have \
+into that one call rather than asking one, waiting, then asking another -- the user answers \
+the whole batch together. If a question has a small set of sensible discrete answers, \
+include 2-4 short options; leave options out for a genuinely open-ended question rather \
+than inventing artificial choices. There is no small target round count to hit -- ask as \
+many rounds as the use case genuinely needs -- but there is a hard safety ceiling of \
+{MAX_CLARIFICATION_ROUNDS} rounds total, after which the tool will no longer be available \
+and you must submit your best recommendation with what you have, noting remaining \
+uncertainty in the rationale. Well before that ceiling, converge once you have enough to \
+make a defensible recommendation -- don't pad a batch with questions that wouldn't change \
+it.
 - Categorize each resource as must_have (structurally required to represent the core \
 data described) or potentially_needed (commonly paired, situational).
 - Prefer to converge quickly: 2-4 searches is usually enough before you should either \
@@ -268,12 +288,14 @@ def _parse_tool_uses(content: list[dict]) -> tuple[list[dict], dict | None, dict
         if block["name"] == "search_fhir_kb":
             search_blocks.append({"id": block["id"], "query": block.get("input", {}).get("query", "")})
         elif block["name"] == "ask_clarifying_question":
-            options = block["input"].get("options")
-            ask_block = {
-                "id": block["id"],
-                "question": block["input"]["question"],
-                "options": list(options) if options else None,
-            }
+            questions = [
+                {
+                    "question": q["question"],
+                    "options": list(q["options"]) if q.get("options") else None,
+                }
+                for q in block["input"]["questions"]
+            ]
+            ask_block = {"id": block["id"], "questions": questions}
         elif block["name"] == "submit_recommendation":
             submit_input = block["input"]
 
@@ -353,8 +375,7 @@ def build_graph(
                 "stop_reason": response.stop_reason,
                 "no_tool_use": no_tool_use,
                 "search_queries": [b["query"] for b in search_blocks],
-                "asked_question": ask_block["question"] if ask_block else None,
-                "asked_options": ask_block["options"] if ask_block else None,
+                "asked_questions": ask_block["questions"] if ask_block else None,
                 "submitted": submit_input is not None,
             },
         )
@@ -458,11 +479,11 @@ def build_graph(
         # on every resume, so anything logged before it would double-write on
         # each round-trip. One "finish" entry, written only after interrupt()
         # actually resolves with an answer, is the safe rollup point.
-        answer = interrupt({"question": ask_block["question"], "options": ask_block["options"]})
+        answer = interrupt({"questions": ask_block["questions"]})
         event_logger.log(
             "clarification",
             "finish",
-            input_data={"question": ask_block["question"], "options": ask_block["options"]},
+            input_data={"questions": ask_block["questions"]},
             output_data={"answer": answer},
         )
 
