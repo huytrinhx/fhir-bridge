@@ -97,8 +97,8 @@ def build_display_transcript(messages: list[dict]) -> list[dict]:
                     query = block.get("input", {}).get("query", "")
                     entries.append({"role": role, "kind": "search", "text": f"Searched: {query!r}"})
                 elif block.get("name") == "ask_clarifying_question":
-                    questions = block.get("input", {}).get("questions", [])
-                    entries.append({"role": role, "kind": "question", "text": " / ".join(questions)})
+                    question = block.get("input", {}).get("question", "")
+                    entries.append({"role": role, "kind": "question", "text": question})
             elif block_type == "tool_result":
                 source_tool = tool_name_by_id.get(block.get("tool_use_id", ""))
                 text = block.get("content", "")
@@ -117,7 +117,11 @@ class OutOfScope:
 
 @dataclass(frozen=True)
 class ClarifyingQuestion:
-    questions: list[str]
+    question: str
+    # 2-4 short option labels the model judged the question option-worthy
+    # enough to propose, or None for a genuinely open-ended question -- a
+    # free-text answer is always valid either way (see respond()).
+    options: list[str] | None
 
 
 @dataclass(frozen=True)
@@ -248,8 +252,8 @@ class FhirBridgeSession:
 
         if result.get("__interrupt__"):
             self._awaiting_answer = True
-            questions = result["ask_block"]["questions"]
-            return ClarifyingQuestion(questions=list(questions))
+            ask_block = result["ask_block"]
+            return ClarifyingQuestion(question=ask_block["question"], options=ask_block["options"])
 
         self._awaiting_answer = False
         outcome = result["outcome"]

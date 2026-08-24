@@ -51,9 +51,11 @@ def main() -> int:
             return 0
 
         if isinstance(outcome, ClarifyingQuestion):
-            print("\nA few questions before I can recommend resources:")
-            for i, question in enumerate(outcome.questions, start=1):
-                print(f"  {i}. {question}")
+            print(f"\n{outcome.question}")
+            if outcome.options:
+                for i, option in enumerate(outcome.options, start=1):
+                    print(f"  {i}. {option}")
+                print("  (or type a free-text answer)")
             answer = input("\n> ")
             outcome = session.respond(answer)
             continue

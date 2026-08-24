@@ -51,7 +51,7 @@ export interface ResourceMappingResponse {
 
 export type MessageResponse =
   | { kind: "out_of_scope"; session_id: string; reason: string }
-  | { kind: "clarifying_question"; session_id: string; questions: string[] }
+  | { kind: "clarifying_question"; session_id: string; question: string; options: string[] | null }
   | {
       kind: "final_recommendation";
       session_id: string;
