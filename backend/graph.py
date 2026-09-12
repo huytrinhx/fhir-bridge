@@ -32,6 +32,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import interrupt
 
 from backend.guardrails import CitationLedger, WhitelistEntry, validate_recommendations
+from backend.langfuse_setup import generation_span
 from backend.retrieval import FhirRetriever, RetrievedChunk
 
 MAX_TOOL_LOOP_TURNS = 6
@@ -244,30 +245,48 @@ def content_block_to_dict(block: object) -> dict:
     raise TypeError(f"cannot serialize content block of type {type(block)!r}")
 
 
-def _check_intent(client: anthropic.Anthropic, intent_model: str, use_case: str) -> tuple[bool, str]:
-    msg = client.messages.create(
-        model=intent_model,
-        max_tokens=300,
-        tools=[INTENT_TOOL],
-        tool_choice={"type": "tool", "name": "classify_intent"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "This assistant helps engineers figure out which FHIR resources to "
-                    "use for real-world data sources they describe. Inputs are often "
-                    "short fragments, not full questions -- e.g. 'raw data from vital "
-                    "monitors' or 'supply orders and charges' are typical, valid inputs. "
-                    "Classify in_scope=true if the message describes, even briefly, a "
-                    "real-world data source, business process, or record type that "
-                    "plausibly needs representing as healthcare/clinical/administrative "
-                    "data. Classify in_scope=false only if it is unrelated to healthcare "
-                    "data entirely (general chit-chat, unrelated coding questions, "
-                    f"off-topic requests). Message: {use_case!r}"
-                ),
-            }
-        ],
+def _record_generation(generation: Any, response: Any) -> None:
+    """Shared by both client.messages.create() call sites below -- attaches the
+    response's content/token usage to its generation_span (backend/
+    langfuse_setup.py). `usage` is defensively optional since tests exercise
+    these nodes against fakes that only need to satisfy the shape graph.py's
+    own logic reads (content, stop_reason), not the full Anthropic response."""
+    usage = getattr(response, "usage", None)
+    generation.update(
+        output=[content_block_to_dict(b) for b in response.content],
+        usage_details=(
+            {"input": usage.input_tokens, "output": usage.output_tokens} if usage is not None else None
+        ),
     )
+
+
+def _check_intent(client: anthropic.Anthropic, intent_model: str, use_case: str) -> tuple[bool, str]:
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "This assistant helps engineers figure out which FHIR resources to "
+                "use for real-world data sources they describe. Inputs are often "
+                "short fragments, not full questions -- e.g. 'raw data from vital "
+                "monitors' or 'supply orders and charges' are typical, valid inputs. "
+                "Classify in_scope=true if the message describes, even briefly, a "
+                "real-world data source, business process, or record type that "
+                "plausibly needs representing as healthcare/clinical/administrative "
+                "data. Classify in_scope=false only if it is unrelated to healthcare "
+                "data entirely (general chit-chat, unrelated coding questions, "
+                f"off-topic requests). Message: {use_case!r}"
+            ),
+        }
+    ]
+    with generation_span(name="intent", model=intent_model, messages=messages) as generation:
+        msg = client.messages.create(
+            model=intent_model,
+            max_tokens=300,
+            tools=[INTENT_TOOL],
+            tool_choice={"type": "tool", "name": "classify_intent"},
+            messages=messages,
+        )
+        _record_generation(generation, msg)
     for block in msg.content:
         if block.type == "tool_use" and block.name == "classify_intent":
             return bool(block.input["in_scope"]), str(block.input["reason"])
@@ -352,14 +371,16 @@ def build_graph(
             },
         )
 
-        response = client.messages.create(
-            model=synth_model,
-            max_tokens=1500,
-            system=SYNTH_SYSTEM_PROMPT,
-            tools=tools,
-            tool_choice={"type": "any"},
-            messages=state["messages"],
-        )
+        with generation_span(name="reasoning", model=synth_model, messages=state["messages"]) as generation:
+            response = client.messages.create(
+                model=synth_model,
+                max_tokens=1500,
+                system=SYNTH_SYSTEM_PROMPT,
+                tools=tools,
+                tool_choice={"type": "any"},
+                messages=state["messages"],
+            )
+            _record_generation(generation, response)
         content = [content_block_to_dict(b) for b in response.content]
         messages = state["messages"] + [{"role": "assistant", "content": content}]
 

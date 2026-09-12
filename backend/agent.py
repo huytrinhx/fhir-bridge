@@ -20,6 +20,7 @@ from backend.config import Settings, load_settings
 from backend.event_stream import CompositeEventLogger
 from backend.graph import build_graph, content_block_to_dict
 from backend.guardrails import Citation, Recommendation, load_whitelist
+from backend.langfuse_setup import get_trace_url, new_callback_handler
 from backend.persistence import EventLogger
 from backend.retrieval import FhirRetriever
 
@@ -168,6 +169,7 @@ class FhirBridgeSession:
         *,
         persist: bool = True,
         session_id: str | None = None,
+        user_id: str | None = None,
     ):
         self._settings = settings or load_settings()
         # Intent gate model is admin-configured (backend/api.py::_resolve_model_
@@ -201,6 +203,9 @@ class FhirBridgeSession:
         # correlate with the same id the frontend/API already know it by
         # (see backend/api.py's conversation_id), not a second, invisible id.
         self._thread_id = session_id or str(uuid.uuid4())
+        # None for guests -- new_callback_handler() tags those "guest" in
+        # Langfuse rather than leaving the field empty.
+        self._user_id = user_id
         # EventLogger opens its own connections (see backend/persistence.py)
         # rather than sharing self._checkpoint_conn -- settings=None for
         # guests, same persist gate as the checkpointer above. Wrapped in
@@ -243,18 +248,35 @@ class FhirBridgeSession:
             raise RuntimeError("start() already called on this session")
         self._started = True
 
+        handler, config = self._turn_config()
         result = self._graph.invoke(
             {"use_case": use_case, "messages": [], "turn_index": 0, "clarification_rounds": 0, "ledger": {}},
-            config=self._config,
+            config=config,
         )
+        self._log_trace_url(handler)
         return self._extract_outcome(result)
 
     def respond(self, answer: str) -> TurnOutcome:
         if not self._awaiting_answer:
             raise RuntimeError("no pending clarifying question to respond to")
 
-        result = self._graph.invoke(Command(resume=answer), config=self._config)
+        handler, config = self._turn_config()
+        result = self._graph.invoke(Command(resume=answer), config=config)
+        self._log_trace_url(handler)
         return self._extract_outcome(result)
+
+    def _turn_config(self):
+        """A fresh Langfuse callback handler per graph turn (see
+        backend/langfuse_setup.py) -- one trace per start()/respond() call,
+        grouped under this conversation's thread_id in Langfuse's session
+        view -- merged into this session's base LangGraph config."""
+        handler, langfuse_config = new_callback_handler(user_id=self._user_id, session_id=self._thread_id)
+        return handler, {**self._config, **langfuse_config}
+
+    def _log_trace_url(self, handler) -> None:
+        trace_url = get_trace_url(handler.last_trace_id)
+        if trace_url:
+            print(f"[langfuse] trace: {trace_url}")
 
     def _extract_outcome(self, result: dict) -> TurnOutcome:
         self._messages = result["messages"]

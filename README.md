@@ -74,7 +74,8 @@ refreshing), not part of the live request path:
   catalog) and an [OpenAI](https://platform.openai.com) API key (KB
   embeddings)
 - Optional: [Resend](https://resend.com) API key for feedback-report emails,
-  Google OAuth client credentials for social login
+  Google OAuth client credentials for social login, [Langfuse](https://www.langfuse.com)
+  API keys for per-turn LLM tracing (see `.env.example`)
 
 ## Setup
 
