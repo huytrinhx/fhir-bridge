@@ -10,3 +10,5 @@ uv.lock
 scratchpad.json
 railway
 railway.pub
+docker-compose.override.yml
+certs/
