@@ -25,6 +25,16 @@ dependencies = [
     "bcrypt>=4.0",
     "langgraph>=1.2.11",
     "langgraph-checkpoint-postgres>=3.1.2",
+    # langfuse.langchain.CallbackHandler (backend/langfuse_setup.py) imports
+    # the full `langchain` package itself, not just langchain-core (already
+    # pulled in transitively by langgraph) -- it inspects langchain.__version__
+    # to pick its v0-vs-v1 import branch.
+    "langchain>=1.4.0",
+    # Pinned exact, not floored, like orthopedics-product-agents does --
+    # backend/langfuse_setup.py calls start_as_current_observation() directly
+    # (no start_as_current_generation() alias in this version), so a minor
+    # bump could silently change that surface.
+    "langfuse==4.15.1",
 ]
 
 [project.optional-dependencies]

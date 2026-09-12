@@ -48,6 +48,7 @@ from backend.agent import (
 )
 from backend.config import load_settings
 from backend.guardrails import load_whitelist
+from backend.langfuse_setup import configure_langfuse
 from backend.mapping import build_resource_mapping
 from backend.models import list_available_models
 from backend.notifications import notify_feedback_submitted
@@ -104,6 +105,9 @@ async def _sweep_idle_sessions() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Initializes (and logs a warning if unconfigured) up front, rather than
+    # silently on the first chat request -- see backend/langfuse_setup.py.
+    configure_langfuse()
     event_stream.bind_loop(asyncio.get_running_loop())
     sweep_task = asyncio.create_task(_sweep_idle_sessions())
     yield
@@ -328,6 +332,7 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
             intent_model=default_intent_model,
             persist=bool(user_id),
             session_id=conversation_id,
+            user_id=user_id,
         )
         initial_message = compose_use_case(message, data_sample, req.data_format, req.terminology_system)
         outcome = await _run_agent_call(session.start, initial_message)
@@ -610,7 +615,12 @@ async def rerun_conversation(conversation_id: str, authorization: str | None = H
     # persist=True: this route requires auth (_require_user_id above), never
     # reachable by a guest.
     session = FhirBridgeSession(
-        settings, synth_model=model, intent_model=default_intent_model, persist=True, session_id=new_id
+        settings,
+        synth_model=model,
+        intent_model=default_intent_model,
+        persist=True,
+        session_id=new_id,
+        user_id=user_id,
     )
     initial_message = compose_use_case(
         row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
@@ -760,7 +770,12 @@ async def admin_rerun_conversation(
     # persist=True: this route requires admin auth (_require_admin above),
     # never reachable by a guest.
     session = FhirBridgeSession(
-        settings, synth_model=req.model, intent_model=default_intent_model, persist=True, session_id=new_id
+        settings,
+        synth_model=req.model,
+        intent_model=default_intent_model,
+        persist=True,
+        session_id=new_id,
+        user_id=admin_user_id,
     )
     initial_message = compose_use_case(
         row["initial_message"], row["data_sample"], row["data_format"], row["terminology_system"]
