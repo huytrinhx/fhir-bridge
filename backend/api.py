@@ -321,10 +321,20 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
 
         message = req.message
         data_sample = req.data_sample
+        # message_persist/data_sample_persist: asterisk-masked twins (see
+        # backend/phi_redaction.py's "persist" mode), derived from the same
+        # raw request text as message/data_sample below. They go to the
+        # conversations table and the decision-event log; the LLM and the
+        # in-memory session only ever see message/data_sample (today's
+        # typed-placeholder redaction, unchanged).
+        message_persist = message
+        data_sample_persist = data_sample
         if user_id:
-            message, _ = redact_phi(message)
+            message, _ = redact_phi(message, mode="llm")
+            message_persist, _ = redact_phi(req.message, mode="persist")
             if data_sample:
-                data_sample, _ = redact_phi(data_sample)
+                data_sample_persist, _ = redact_phi(data_sample, mode="persist")
+                data_sample, _ = redact_phi(data_sample, mode="llm")
 
         # persist=bool(user_id): guests get zero persistence, full stop -- that
         # includes the graph's own checkpointer, not just the conversations
@@ -338,7 +348,10 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
             user_id=user_id,
         )
         initial_message = compose_use_case(message, data_sample, req.data_format, req.terminology_system)
-        outcome = await _run_agent_call(session.start, initial_message)
+        initial_message_masked = compose_use_case(
+            message_persist, data_sample_persist, req.data_format, req.terminology_system
+        )
+        outcome = await _run_agent_call(session.start, initial_message, initial_message_masked)
 
         _sessions[conversation_id] = session
         _session_models[conversation_id] = model
@@ -352,10 +365,10 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
                 session,
                 outcome,
                 user_id=user_id,
-                initial_message=message,
+                initial_message=message_persist,
                 data_format=req.data_format,
                 terminology_system=req.terminology_system,
-                data_sample=data_sample,
+                data_sample=data_sample_persist,
                 model=model,
             )
         return {"session_id": conversation_id, **_serialize_outcome(outcome)}
@@ -365,10 +378,12 @@ async def post_message(req: MessageRequest, authorization: str | None = Header(N
         raise HTTPException(status_code=404, detail="unknown session_id")
 
     message = req.message
+    message_persist = message
     if user_id:
-        message, _ = redact_phi(message)
+        message_persist, _ = redact_phi(req.message, mode="persist")
+        message, _ = redact_phi(message, mode="llm")
 
-    outcome = await _run_agent_call(session.respond, message)
+    outcome = await _run_agent_call(session.respond, message, message_persist)
     _session_last_active[req.session_id] = time.time()
 
     if user_id:

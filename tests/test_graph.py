@@ -192,6 +192,47 @@ def test_out_of_scope_short_circuits_before_reasoning():
     assert len(client.messages.calls) == 1  # only the intent call, no reasoning turn
 
 
+def test_intent_event_logs_use_case_masked_when_provided():
+    # See backend/phi_redaction.py's "persist" mode and backend/agent.py::
+    # FhirBridgeSession.start -- the decision-event log gets the
+    # asterisk-masked twin, never the raw/typed-placeholder-redacted
+    # use_case that actually drives intent classification below.
+    #
+    # in_scope=False so the graph stops right after intent_node (same
+    # reason test_out_of_scope_short_circuits_before_reasoning above uses
+    # it) -- only one model call is scripted, and this test only cares what
+    # got logged before that call, not what happens after it.
+    client = FakeAnthropicClient([intent_response(in_scope=False, reason="test reason")])
+    retriever = FakeRetriever()
+    events = FakeEventLogger()
+    graph = make_graph(client, retriever, event_logger=events)
+
+    payload = {**start_payload("Patient SSN is 123-45-6789"), "use_case_masked": "Patient SSN is ***********"}
+    invoke(graph, payload)
+
+    intent_start = next(c for c in events.calls if c[:2] == ("intent", "start"))
+    assert intent_start[2] == {"use_case": "Patient SSN is ***********"}
+    # The real (unmasked) use_case is still what reached the model.
+    sent_content = client.messages.calls[0]["messages"][0]["content"]
+    assert "Patient SSN is 123-45-6789" in sent_content
+    assert "Patient SSN is ***********" not in sent_content
+
+
+def test_intent_event_falls_back_to_use_case_without_a_masked_variant():
+    # Backward compatibility: a payload built the old way (no
+    # use_case_masked key, e.g. an older/direct caller) logs use_case
+    # itself, unchanged from pre-existing behavior.
+    client = FakeAnthropicClient([intent_response(in_scope=False, reason="test reason")])
+    retriever = FakeRetriever()
+    events = FakeEventLogger()
+    graph = make_graph(client, retriever, event_logger=events)
+
+    invoke(graph, start_payload("raw patient registration feed"))
+
+    intent_start = next(c for c in events.calls if c[:2] == ("intent", "start"))
+    assert intent_start[2] == {"use_case": "raw patient registration feed"}
+
+
 def test_search_then_submit_produces_final_recommendation():
     client = FakeAnthropicClient(
         [
@@ -508,6 +549,69 @@ def test_event_logger_logs_clarification_once_per_round_not_on_pause():
 
     clarification_calls = [c for c in events.calls if c[0] == "clarification"]
     assert [c[:2] for c in clarification_calls] == [("clarification", "finish")]
+    assert clarification_calls[0][3] == {"answer": "No device tracking needed."}
+
+
+def test_clarification_resume_with_masked_dict_logs_mask_but_continues_on_real_answer():
+    # respond() resumes with {"answer": ..., "answer_masked": ...} (see
+    # backend/agent.py::FhirBridgeSession.respond) so the event log gets the
+    # asterisk-masked answer while the graph itself -- and therefore the
+    # next model call -- still sees the real, typed-placeholder-redacted one.
+    client = FakeAnthropicClient(
+        [
+            intent_response(in_scope=True),
+            ask_response(["Need device tracking?"]),
+            submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
+        ]
+    )
+    retriever = FakeRetriever({"patient": [PATIENT_CHUNK]})
+    events = FakeEventLogger()
+    graph = make_graph(client, retriever, event_logger=events)
+
+    result1, config = invoke(graph, start_payload("raw patient registration feed"))
+    assert "__interrupt__" in result1
+
+    graph.invoke(
+        Command(resume={"answer": "SSN is 123-45-6789.", "answer_masked": "SSN is ***********."}),
+        config,
+    )
+
+    clarification_calls = [c for c in events.calls if c[0] == "clarification"]
+    assert clarification_calls[0][3] == {"answer": "SSN is ***********."}
+
+    # The real answer -- not the mask -- is what the next model call actually saw.
+    last_call_messages = client.messages.calls[-1]["messages"]
+    tool_result_contents = [
+        block["content"]
+        for message in last_call_messages
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block.get("type") == "tool_result"
+    ]
+    assert any("SSN is 123-45-6789." in content for content in tool_result_contents)
+    assert not any("***********" in content for content in tool_result_contents)
+
+
+def test_clarification_resume_with_bare_string_still_works():
+    # Backward compatibility with a direct (non-api.py) caller resuming with
+    # a bare string, exactly like test_event_logger_logs_clarification_once_
+    # per_round_not_on_pause above -- answer and the logged copy are the same
+    # value, matching pre-existing behavior.
+    client = FakeAnthropicClient(
+        [
+            intent_response(in_scope=True),
+            ask_response(["Need device tracking?"]),
+            submit_response([{"resource_type": "Patient", "rationale": "core identity record"}]),
+        ]
+    )
+    retriever = FakeRetriever({"patient": [PATIENT_CHUNK]})
+    events = FakeEventLogger()
+    graph = make_graph(client, retriever, event_logger=events)
+
+    _, config = invoke(graph, start_payload("raw patient registration feed"))
+    graph.invoke(Command(resume="No device tracking needed."), config)
+
+    clarification_calls = [c for c in events.calls if c[0] == "clarification"]
     assert clarification_calls[0][3] == {"answer": "No device tracking needed."}
 
 
