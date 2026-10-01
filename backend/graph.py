@@ -219,6 +219,12 @@ class EventLogger(Protocol):
 
 class GraphState(TypedDict, total=False):
     use_case: str
+    # Length-preserving asterisk-masked twin of use_case, logged in place of
+    # it (see intent_node) so the decision-event log never carries the
+    # model-facing typed-placeholder redaction of the user's raw input.
+    # Optional: falls back to use_case itself when a caller doesn't supply
+    # it (see backend/agent.py::FhirBridgeSession.start).
+    use_case_masked: str
     messages: list[dict]
     turn_index: int
     clarification_rounds: int
@@ -332,7 +338,9 @@ def build_graph(
     checkpointer: BaseCheckpointSaver,
 ) -> CompiledStateGraph:
     def intent_node(state: GraphState) -> dict:
-        event_logger.log("intent", "start", input_data={"use_case": state["use_case"]})
+        event_logger.log(
+            "intent", "start", input_data={"use_case": state.get("use_case_masked", state["use_case"])}
+        )
         in_scope, reason = _check_intent(client, intent_model, state["use_case"])
         event_logger.log("intent", "finish", output_data={"in_scope": in_scope, "reason": reason})
         if not in_scope:
@@ -500,12 +508,24 @@ def build_graph(
         # on every resume, so anything logged before it would double-write on
         # each round-trip. One "finish" entry, written only after interrupt()
         # actually resolves with an answer, is the safe rollup point.
-        answer = interrupt({"questions": ask_block["questions"]})
+        resumed = interrupt({"questions": ask_block["questions"]})
+        # respond() resumes with {"answer": ..., "answer_masked": ...} (see
+        # backend/agent.py::FhirBridgeSession.respond) so the logged copy can
+        # be asterisk-masked while the graph still continues on the
+        # typed-placeholder-redacted answer. A bare string is also accepted
+        # (older/direct callers, and this file's own tests) and used for
+        # both, matching the pre-existing behavior.
+        if isinstance(resumed, dict):
+            answer = resumed["answer"]
+            answer_masked = resumed.get("answer_masked", answer)
+        else:
+            answer = resumed
+            answer_masked = resumed
         event_logger.log(
             "clarification",
             "finish",
             input_data={"questions": ask_block["questions"]},
-            output_data={"answer": answer},
+            output_data={"answer": answer_masked},
         )
 
         tool_results = list(state.get("pending_tool_results", []))

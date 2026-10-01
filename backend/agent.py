@@ -243,25 +243,44 @@ class FhirBridgeSession:
         """Raw SDK-shaped message list, for persistence (see serialize_messages)."""
         return self._messages
 
-    def start(self, use_case: str) -> TurnOutcome:
+    def start(self, use_case: str, use_case_masked: str | None = None) -> TurnOutcome:
+        """use_case_masked: asterisk-masked twin of use_case for the
+        decision-event log (see backend/graph.py::GraphState.use_case_masked
+        and backend/phi_redaction.py's "persist" mode). Defaults to
+        use_case itself when not given, matching the pre-existing
+        single-redaction behavior."""
         if self._started:
             raise RuntimeError("start() already called on this session")
         self._started = True
 
         handler, config = self._turn_config()
         result = self._graph.invoke(
-            {"use_case": use_case, "messages": [], "turn_index": 0, "clarification_rounds": 0, "ledger": {}},
+            {
+                "use_case": use_case,
+                "use_case_masked": use_case_masked if use_case_masked is not None else use_case,
+                "messages": [],
+                "turn_index": 0,
+                "clarification_rounds": 0,
+                "ledger": {},
+            },
             config=config,
         )
         self._log_trace_url(handler)
         return self._extract_outcome(result)
 
-    def respond(self, answer: str) -> TurnOutcome:
+    def respond(self, answer: str, answer_masked: str | None = None) -> TurnOutcome:
+        """answer_masked: asterisk-masked twin of answer for the
+        decision-event log (see backend/graph.py::clarification_node).
+        Defaults to answer itself when not given."""
         if not self._awaiting_answer:
             raise RuntimeError("no pending clarifying question to respond to")
 
         handler, config = self._turn_config()
-        result = self._graph.invoke(Command(resume=answer), config=config)
+        resume_payload = {
+            "answer": answer,
+            "answer_masked": answer_masked if answer_masked is not None else answer,
+        }
+        result = self._graph.invoke(Command(resume=resume_payload), config=config)
         self._log_trace_url(handler)
         return self._extract_outcome(result)
 

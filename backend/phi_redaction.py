@@ -15,10 +15,25 @@ model. What this DOES catch:
 Same shape/style as backend/code_guard.py's sanitize_rationale: a keyword
 (or direct pattern) triggers redaction of the value near it, returning
 (text, was_redacted) rather than raising.
+
+Two replacement modes share the same matching (see redact_phi's mode
+parameter) -- only the replacement text differs:
+  - "llm" (default): today's typed placeholders ("[REDACTED-SSN]", labeled
+    fields become "<label>: [REDACTED]"). The model needs the field-type
+    signal to reason correctly, so this is what's sent to the LLM.
+  - "persist": character-preserving asterisk masking (length/shape kept,
+    e.g. "123-45-6789" -> "***********") for values written to the
+    conversations table or the decision-event log -- nothing that reaches
+    storage needs the type signal, and a fixed-length placeholder is a
+    smaller information leak (e.g. it doesn't reveal an SSN vs a shorter ID).
 """
 from __future__ import annotations
 
 import re
+from typing import Literal
+
+RedactionMode = Literal["llm", "persist"]
+_MODES: tuple[RedactionMode, ...] = ("llm", "persist")
 
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}\b")
@@ -41,15 +56,27 @@ _LABELED_FIELD_RE = re.compile(
 )
 
 
-def redact_phi(text: str) -> tuple[str, bool]:
+def redact_phi(text: str, *, mode: RedactionMode = "llm") -> tuple[str, bool]:
     """Returns (possibly-redacted text, whether anything was redacted).
 
     Labeled-field redaction runs first (on the original text), direct
     patterns run second as cleanup for anything left unlabeled -- in that
     order specifically, because a direct-pattern tag like "[REDACTED-SSN]"
     contains "SSN" as a standalone word, which the labeled-field pass would
-    otherwise match a second time inside its own output if it ran last.
+    otherwise match a second time inside its own output if it ran last (this
+    ordering constraint is why "persist" mode's asterisk output, which
+    contains no such re-matchable words, still runs the passes in the same
+    order -- for one matching pipeline regardless of mode, not because
+    persist mode needs the ordering itself).
+
+    Args:
+        text: input text, possibly containing PHI.
+        mode: "llm" (default) keeps today's typed placeholders for the
+            model-facing path; "persist" produces length-preserving asterisk
+            masks for anything written to storage. See module docstring.
     """
+    if mode not in _MODES:
+        raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
     if not text:
         return text, False
 
@@ -59,13 +86,22 @@ def redact_phi(text: str) -> tuple[str, bool]:
     def _label_sub(match: re.Match[str]) -> str:
         nonlocal redacted
         redacted = True
-        return f"{match.group(1)}: [REDACTED]"
+        label, value = match.group(1), match.group(2)
+        if mode == "persist":
+            return f"{label}: {'*' * len(value)}"
+        return f"{label}: [REDACTED]"
 
     result = _LABELED_FIELD_RE.sub(_label_sub, result)
 
-    for pattern, replacement in _DIRECT_PATTERNS:
-        result, count = pattern.subn(replacement, result)
-        if count:
-            redacted = True
+    if mode == "persist":
+        for pattern, _replacement in _DIRECT_PATTERNS:
+            result, count = pattern.subn(lambda m: "*" * len(m.group(0)), result)
+            if count:
+                redacted = True
+    else:
+        for pattern, replacement in _DIRECT_PATTERNS:
+            result, count = pattern.subn(replacement, result)
+            if count:
+                redacted = True
 
     return result, redacted
